@@ -1,0 +1,17 @@
+# Ignore data folder
+data/
+
+# Ignore system junk
+.DS_Store
+
+# Ignore R junk
+.Rhistory
+.Rproj.user/
+
+# Ignore Jupyter junk
+.ipynb_checkpoints/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
