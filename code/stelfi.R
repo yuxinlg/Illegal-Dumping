@@ -17,10 +17,18 @@ plan(multisession)
 shp_24 <- read_sf("data/311/2024/public_cases_fc.shp")
 shp_24_litter <- shp_24 %>%
   filter(service_na == "Illegal Dumping")
+head(shp_24_litter)
+
+sum(!is.na(shp_24_litter$media_url))
+7322/22173
+
 
 shp_23 <- read_sf("data/311/2023/public_cases_fc.shp")
 shp_23_litter <- shp_23 %>%
   filter(service_na == "Illegal Dumping")
+sum(!is.na(shp_23_litter$media_url))
+
+
 head(shp_23_litter$media_url,10)
 shp_litter_combined <- bind_rows(shp_24_litter, shp_23_litter)
 

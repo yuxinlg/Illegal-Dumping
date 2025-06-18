@@ -46,7 +46,7 @@ rename_map <- c(
 )
 
 # loop through years to get shp files
-for (year in 2017:2019) {
+for (year in 2014:2024) {
   year_short <- substr(as.character(year), 3, 4)
   folder_path <- file.path(base_dir, as.character(year))
   
@@ -69,17 +69,65 @@ for (year in 2017:2019) {
 }
 
 # loop for filtering "Illegal Dumping" service
-for (year in 2017:2019) {
+for (year in 2014:2024) {
   year_short <- substr(as.character(year), 3, 4)
-  shp_var <- get(paste0("shp_", year_short))
+  shp_name <- paste0("shp_", year_short)
+  shp_var <- get(shp_name)
   
   # Filter for service_name == "Illegal Dumping"
   shp_illegal <- shp_var[shp_var$service_name == "Illegal Dumping", ]
   
   # Assign new variable
   assign(paste0("shp_illegal_", year_short), shp_illegal)
+  
+  # Clean up
   rm(shp_illegal)
+  rm(shp_var)
+  
+  # Remove original shp_XX if year is between 2014 and 2021
+  if (as.numeric(year_short) >= 14 && as.numeric(year_short) <= 24) {
+    if (exists(shp_name)) rm(list = shp_name)
+  }
 }
+
+# loop for count NA in `media_url`
+na_counts <- data.frame(name = character(), 
+                        count_media = integer(), 
+                        observation = integer(),
+                        pct = character(),
+                        stringsAsFactors = FALSE)
+
+for (year in 2014:2024) {
+  year_short <- substr(as.character(year),3,4)
+  shp_name <- paste0("shp_illegal_", year_short)
+  shp_var <- get(shp_name)
+  
+  # count NA in media
+  count_na <- sum(is.na(shp_var$media_url))
+  
+  # get the number of media
+  count_media <- nrow(shp_var) - count_na
+  
+  # get number of observations
+  obs = nrow(shp_var)
+  
+  # get percentage
+  pct = paste0(round((count_media/obs),2)*100, "%")
+  
+  # append result
+  na_counts <- rbind(na_counts, data.frame(name = shp_name, 
+                                           count_media = count_media,
+                                           observation = obs,
+                                           pct = pct))
+}
+
+na_counts
+
+shp_illegal_16 %>%
+  filter(!is.na(media_url))
+
+
+
 
 ############################# Get Philly ACS data ##############################
 # manually download ACS shapefile

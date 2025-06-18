@@ -14,7 +14,7 @@ library(ggmap)
 shp_24 <- read_sf("data/311/2024/public_cases_fc.shp")
 shp_24_litter <- shp_24 %>%
   filter(service_na == "Illegal Dumping")
-
+head(shp_24_litter)
 #### stelfi
 philly <- st_read("data/City_Limits/City_Limits.shp")
 

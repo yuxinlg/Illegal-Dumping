@@ -1,0 +1,7 @@
+﻿"Field Name","Alias","Description","Type"
+"ACRES","","","Numeric"
+"OBJECTID","","","Numeric"
+"SHAPE","","","Numeric"
+"SQ_MILES","","","Numeric"
+"WATERSHED","","","Text"
+"WATERSHED_NAME","","","Text"
