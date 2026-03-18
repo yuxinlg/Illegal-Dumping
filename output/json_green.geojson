@@ -1,0 +1,10 @@
+{
+"type": "FeatureCollection",
+"name": "json_green",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::26918" } },
+"features": [
+{ "type": "Feature", "properties": { "FID": 0, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 480961.421730766596738, 4426093.779372427612543 ] } },
+{ "type": "Feature", "properties": { "FID": 1, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 478764.66801559511805, 4422759.436297735199332 ] } },
+{ "type": "Feature", "properties": { "FID": 2, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 479554.954484222806059, 4421177.711556688882411 ] } }
+]
+}

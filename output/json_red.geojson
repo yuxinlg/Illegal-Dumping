@@ -1,0 +1,17 @@
+{
+"type": "FeatureCollection",
+"name": "json_red",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:EPSG::26918" } },
+"features": [
+{ "type": "Feature", "properties": { "FID": 0, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 482762.46687054290669, 4427609.259766437113285 ] } },
+{ "type": "Feature", "properties": { "FID": 1, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 481162.52314271236537, 4426508.567574573680758 ] } },
+{ "type": "Feature", "properties": { "FID": 2, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 478711.073999234009534, 4422464.287538576871157 ] } },
+{ "type": "Feature", "properties": { "FID": 3, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 478816.335331024019979, 4423845.307101219892502 ] } },
+{ "type": "Feature", "properties": { "FID": 4, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 478831.276704868592788, 4421747.032584391534328 ] } },
+{ "type": "Feature", "properties": { "FID": 5, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 478883.268470805662218, 4421546.041445573791862 ] } },
+{ "type": "Feature", "properties": { "FID": 6, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 479302.610958737786859, 4421156.57246651314199 ] } },
+{ "type": "Feature", "properties": { "FID": 7, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 479474.022498420556076, 4421044.722454953938723 ] } },
+{ "type": "Feature", "properties": { "FID": 8, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 479788.976360937871505, 4421137.007724365219474 ] } },
+{ "type": "Feature", "properties": { "FID": 9, "title": "Point", "SymbolID": "Override 1" }, "geometry": { "type": "Point", "coordinates": [ 479705.507084888755344, 4421230.354912463575602 ] } }
+]
+}
