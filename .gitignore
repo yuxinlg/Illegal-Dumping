@@ -1,17 +1,33 @@
-# Ignore data folder
+# ── Raw data (never committed) ───────────────────────────────────────────────
 data/
+parks/
 
-# Ignore system junk
+# Root-level loose data files
+1000batch_manual_ElenaL.csv
+focus_group_map/JSON/
+
+# ── Intermediate / generated artifacts ───────────────────────────────────────
+cache/
+frames/
+*.pkl
+
+# ── Working / scratch files ───────────────────────────────────────────────────
+Untitled.ipynb
+slides/
+
+# ── Office documents (not analysis artifacts) ────────────────────────────────
+*.docx
+*.pages
+*.numbers
+
+# ── System / editor junk ─────────────────────────────────────────────────────
 .DS_Store
-
-# Ignore R junk
 .Rhistory
 .Rproj.user/
 
-# Ignore Jupyter junk
+# ── Jupyter ──────────────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 
-# Ignore Python cache
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
-

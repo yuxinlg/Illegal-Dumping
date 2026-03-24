@@ -1,0 +1,38 @@
+# Core scientific stack
+numpy==1.24.4
+pandas==2.2.3
+scipy==1.11.4
+scikit-learn==1.7.1
+
+# Geospatial
+geopandas==0.14.4
+shapely==2.0.6
+fiona==1.10.1
+rasterio==1.4.3
+rasterstats==0.20.0
+osmnx==1.9.4
+contextily==1.7.0
+momepy==0.10.0
+
+# Network analysis (street connectivity covariates)
+networkx==3.3
+python-igraph==0.11.9
+
+# Bayesian inference / JAX
+jax==0.4.23
+jaxlib==0.4.23
+numpyro==0.12.1
+
+# Visualization
+matplotlib==3.10.1
+seaborn==0.13.2
+matplotlib-scalebar==0.9.0
+Pillow==11.2.1
+
+# Utilities
+tqdm==4.67.1
+tabulate
+deweydatapy==0.3.0
+
+# BSTPP (modified version -- see README.md for installation instructions)
+# bstpp @ git+https://github.com/<your-org>/BSTPP.git
