@@ -1,6 +1,7 @@
 # ── Raw data (never committed) ───────────────────────────────────────────────
 data/
 parks/
+replication/data/
 
 # Root-level loose data files
 1000batch_manual_ElenaL.csv
