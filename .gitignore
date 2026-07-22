@@ -12,6 +12,20 @@ cache/
 frames/
 *.pkl
 
+# ── Large geospatial / tabular datasets (kept local, too big for GitHub) ─────
+*.geojson
+*.gpkg
+*.parquet
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.tif
+*.tiff
+# Large network-connectivity exports
+*_connectivity.csv
+
 # ── Working / scratch files ───────────────────────────────────────────────────
 Untitled.ipynb
 slides/

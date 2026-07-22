@@ -1,0 +1,7 @@
+check,n,pearson,spearman,note
+w_R citywide vs district-wise fit,1335,0.6774798806752634,0.6322217583262462,old fit was within-district centred; citywide adds level variation
+w_R vs log outages-per-pole,1324,0.9861926377947936,0.9978873634842899,sanity: w_R is shrunk log outage-per-pole
+w_R full window vs 2021–23 NT window,1335,0.9500218939688712,0.9454657485897432,high corr → assumption (ii) robust to PSIP timing
+w_R vs LED share,1335,0.28484126349802324,0.22212104167546534,material corr → conversion geography contaminates proxy
+w_R vs pre-2024 relit share,1335,-0.15239513988249614,-0.1872715847421029,material corr → conversion geography contaminates proxy
+log poles vs log foot-traffic exposure,1335,0.45674784654274775,0.5140442716717425,how different the NT and T denominators are
