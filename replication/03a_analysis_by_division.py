@@ -60,7 +60,6 @@ import matplotlib.pyplot as plt
 warnings.filterwarnings("ignore")
 
 REPL_DIR = os.path.dirname(os.path.abspath(__file__))   # replication/
-ROOT_DIR = os.path.dirname(REPL_DIR)                     # repo root
 OUT      = os.path.join(REPL_DIR, "output")
 FIG_BASE = os.path.join(OUT, "figures")
 
@@ -83,6 +82,7 @@ OFFSET_SEASONAL = analysis_base.OFFSET_SEASONAL
 SVI_LR          = analysis_base.SVI_LR
 SVI_NUM_STEPS   = analysis_base.SVI_NUM_STEPS
 FILTER_TO_COV   = analysis_base.FILTER_TO_COV
+SPATIAL_SIGMA_PRIOR_SCALE_M = analysis_base.SPATIAL_SIGMA_PRIOR_SCALE_M
 
 ILLEGAL_DUMPING_PATH = analysis_base.ILLEGAL_DUMPING_PATH
 COV_CBG_PATH         = analysis_base.COV_CBG_PATH
@@ -110,13 +110,15 @@ print(f"  Study years: {STUDY_YEARS} → TOTAL_DAYS = {TOTAL_DAYS}")
 # ── Model window parameters ──────────────────────────────────────────────────
 # Independent of 03_analysis.py's own TEMPORAL_WINDOW/SPATIAL_WINDOW config --
 # see 03_analysis.py Section 1 for what these control.
-TEMPORAL_WINDOW = 0.8       # temporal grid cells for background GP
-SPATIAL_WINDOW  = 0.025     # spatial bandwidth for background GP
+TEMPORAL_WINDOW = analysis_base.TEMPORAL_WINDOW
+SPATIAL_WINDOW  = analysis_base.SPATIAL_WINDOW
 
-PLANNING_DISTRICTS_PATH  = os.path.join(REPL_DIR, "data", "Planning_Districts.geojson")
+PLANNING_DISTRICTS_PATH  = analysis_base.PLANNING_DISTRICTS_PATH
 PLANNING_DISTRICT_ID_COL = "dist_name"
 
-NEIGHBORHOODS_PATH  = os.path.join(ROOT_DIR, "data", "philadelphia-neighborhoods.geojson")
+NEIGHBORHOODS_PATH  = os.path.join(
+    analysis_base.ANALYSIS_ROOT, "data", "philadelphia-neighborhoods.geojson"
+)
 NEIGHBORHOOD_ID_COL = "NAME"
 
 # Optional: restrict to a handful of unit ids for a quick smoke test before
@@ -148,7 +150,7 @@ def build_unit_study_box(geometry, unit_id: str, crs) -> gpd.GeoDataFrame:
 def extract_fit_stats(model, active_cov_names: list) -> dict:
     """
     Pull a small set of scalar posterior summaries out of a fitted
-    Cox_Hawkes_Shared model. Walks model.samples generically rather than
+    pre-S3 Hawkes_Model. Walks model.samples generically rather than
     hardcoding trigger-kernel parameter names, since those vary by the
     configured temporal-trigger kernel.
     """
@@ -286,6 +288,7 @@ def extract_grid_fxy(model, district_geometry, crs) -> gpd.GeoDataFrame:
 
 def run_planning_district_mode() -> None:
     print("\n[1] Loading inputs (planning_district mode) ...")
+    analysis_base.check_required_inputs(use_district=True)
     illegal_dumping = gpd.read_file(ILLEGAL_DUMPING_PATH).to_crs(26918)
     cov_gdf         = gpd.read_file(COV_CBG_PATH).to_crs(26918)
     districts       = gpd.read_file(PLANNING_DISTRICTS_PATH).to_crs(26918)
@@ -327,8 +330,17 @@ def run_planning_district_mode() -> None:
                 cleanup_df       = None,
                 temporal_window  = TEMPORAL_WINDOW,
                 spatial_window   = SPATIAL_WINDOW,
+                spatial_sigma_prior_scale_m = SPATIAL_SIGMA_PRIOR_SCALE_M,
                 svi_lr           = SVI_LR,
                 svi_num_steps    = SVI_NUM_STEPS,
+            )
+            row["temporal_window_days"] = float(TEMPORAL_WINDOW)
+            row["spatial_window_m"] = float(SPATIAL_WINDOW)
+            row["spatial_sigma_prior_scale_m"] = float(
+                SPATIAL_SIGMA_PRIOR_SCALE_M
+            )
+            row["standardization_rows"] = int(
+                model.preview_standardization["row_count"]
             )
             row.update(extract_fit_stats(model, active_cov_names))
             cbg_fxy_rows.append(extract_cbg_fxy(model, district["geometry"], cov_gdf, districts.crs))

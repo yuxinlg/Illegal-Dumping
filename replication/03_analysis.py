@@ -47,14 +47,19 @@ Outputs  (written to replication/output/figures/{prefix}/)
     USE_PARK = False  →  "{lat:.4f}_{lon:.4f}", e.g. "39.9526_-75.1652"
 """
 
+# ruff: noqa: E402 - BSTPP_PREVIEW_ROOT must be applied before bstpp imports.
+
 # =============================================================================
 # SECTION 0 – Imports and global paths
 # =============================================================================
 
 import os
+import sys
+import json
 import warnings
 import calendar
 from datetime import datetime
+from pathlib import Path
 
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
@@ -72,64 +77,27 @@ from shapely.ops import unary_union
 
 import numpyro.distributions as dist
 
+# PRE-S3 REPLICATION EDIT: optionally force imports from the coworker preview
+# checkout. This replaces the retired, untracked cox_hawkes_shared dependency.
+_preview_root_text = os.environ.get("BSTPP_PREVIEW_ROOT")
+if _preview_root_text:
+    _preview_root = Path(_preview_root_text).resolve()
+    if not (_preview_root / "pyproject.toml").is_file():
+        raise RuntimeError("BSTPP_PREVIEW_ROOT must identify the BSTPP preview checkout")
+    sys.path.insert(0, str(_preview_root))
+
 import bstpp
+import bstpp.main
 import bstpp.trigger
-
-# ── bstpp environment verification ────────────────────────────────────────────
-# This analysis requires a CUSTOMIZED version of bstpp that adds the
-# cox_hawkes_shared module (Cox_Hawkes_Shared, attach_litter_survey_args,
-# attach_dumping_report_args).  The standard PyPI package (pip install bstpp)
-# does NOT include this module and will fail here.
-#
-# To verify you are using the correct version, check the path printed below.
-# It should point to your local customized bstpp, NOT the site-packages copy.
-#
-# How to set up the customized bstpp:
-#   Option A — editable install from the local source:
-#       pip install -e /path/to/your/customized/bstpp
-#   Option B — add the parent directory of your customized bstpp to sys.path:
-#       import sys; sys.path.insert(0, "/path/to/customized/")
-#
-print(f"  bstpp loaded from: {bstpp.__file__}")
-
-_REQUIRED_CUSTOM = ["cox_hawkes_shared"]
-_REQUIRED_SYMBOLS = {
-    "bstpp.cox_hawkes_shared": ["Cox_Hawkes_Shared",
-                                 "attach_litter_survey_args",
-                                 "attach_dumping_report_args"],
-}
-import importlib as _il
-for _mod_name, _symbols in _REQUIRED_SYMBOLS.items():
-    try:
-        _mod = _il.import_module(_mod_name)
-    except ImportError:
-        raise ImportError(
-            f"\n\n{'='*60}\n"
-            f"WRONG BSTPP VERSION\n"
-            f"{'='*60}\n"
-            f"Module '{_mod_name}' not found in the bstpp loaded from:\n"
-            f"  {bstpp.__file__}\n\n"
-            f"This script requires the CUSTOMIZED bstpp that includes\n"
-            f"cox_hawkes_shared.  The standard PyPI package does not have it.\n"
-            f"See the comment above this block for setup instructions.\n"
-        )
-    for _sym in _symbols:
-        if not hasattr(_mod, _sym):
-            raise AttributeError(
-                f"\n\nCustom symbol '{_sym}' missing from {_mod_name}.\n"
-                f"bstpp loaded from: {bstpp.__file__}\n"
-                f"Make sure you are using the correct customized version.\n"
-            )
-print(f"  bstpp custom modules verified (cox_hawkes_shared OK).")
-del _il, _REQUIRED_CUSTOM, _REQUIRED_SYMBOLS
-
-import bstpp.cox_hawkes_shared
+from bstpp.main import Hawkes_Model
 from bstpp.trigger import Temporal_Power_Law
-from bstpp.cox_hawkes_shared import (
-    Cox_Hawkes_Shared,
-    attach_litter_survey_args,
-    attach_dumping_report_args,
-)
+
+print(f"  bstpp loaded from: {bstpp.__file__}")
+if _preview_root_text and _preview_root not in Path(bstpp.__file__).resolve().parents:
+    raise RuntimeError(
+        "BSTPP_PREVIEW_ROOT was set, but bstpp was imported from a different checkout: "
+        f"{bstpp.__file__}"
+    )
 
 warnings.filterwarnings("ignore")
 
@@ -198,8 +166,13 @@ def parse_coord(value) -> float:
 
 
 REPL_DIR = os.path.dirname(os.path.abspath(__file__))   # replication/
-DATA     = os.path.join(REPL_DIR, "data")               # replication/data/
-OUT      = os.path.join(REPL_DIR, "output")             # replication/output/
+ROOT_DIR = os.path.dirname(REPL_DIR)                    # repository root
+# PRE-S3 REPLICATION EDIT: sparse checkout inputs live at the analysis root,
+# while generated replication artifacts remain under replication/output.
+ANALYSIS_ROOT = os.path.abspath(os.environ.get("BSTPP_ANALYSIS_ROOT", ROOT_DIR))
+DATA     = os.path.join(ANALYSIS_ROOT, "data")
+INPUT_OUT = os.path.join(ANALYSIS_ROOT, "output")
+OUT      = os.path.join(REPL_DIR, "output")
 FIG_BASE = os.path.join(OUT, "figures")                 # replication/output/figures/
 # Per-run subfolder (output/figures/{prefix}/) is created in __main__ after
 # the prefix is determined from PARK_NAME or the custom coordinate.
@@ -239,8 +212,8 @@ print("=" * 60)
 
 # ── Step 1: choose mode ───────────────────────────────────────────────────────
 USE_CITY     = False    # True = whole Philadelphia (Mode C) — overrides USE_PARK/USE_DISTRICT
-USE_DISTRICT = True   # True = named planning district (Mode D) — overrides USE_PARK; ignored if USE_CITY=True
-USE_PARK     = False    # True = named park (Mode A) | False = custom point (Mode B)
+USE_DISTRICT = False   # Set True for one named district; 03a runs all districts
+USE_PARK     = True    # Replication default: fit one of the named park study boxes
 
 # ── Step 2A: named-park settings  (only used in Mode A) ──────────────────────
 PARK_NAME = "cobbscreek"       # e.g. "mifflin", "cobbscreek", "tacony", "fairmount"
@@ -311,17 +284,19 @@ FILTER_TO_COV = True
 # These are passed to model.set_window() and directly shape the model's
 # internal representation of space and time.
 #
-# TEMPORAL_WINDOW  (int)
-#   Number of temporal grid cells used for the background intensity GP.
-#   Larger values → finer temporal resolution, slower fitting.
-#   Typical range: 50–200.  Default: 100.
+# TEMPORAL_WINDOW  (float)
+#   Real-day computational cutoff for eligible Hawkes parent events.
 #
 # SPATIAL_WINDOW  (float)
-#   Bandwidth of the spatial background GP (unitless, relative to study box).
-#   Smaller → sharper spatial features; larger → smoother surface.
-#   Typical range: 0.05–0.3.  Default: 0.1.
-TEMPORAL_WINDOW = 0.8       # temporal grid cells for background GP
-SPATIAL_WINDOW  = 0.001       # spatial bandwidth for background GP
+#   Real-metre per-axis computational cutoff. A pair is retained when both
+#   |dx| and |dy| are at most this value.
+TEMPORAL_WINDOW = 100.0
+SPATIAL_WINDOW  = 1_000.0
+
+# PRE-S3 REPLICATION EDIT: sigmax_2 is a variance in square metres. Treat the
+# physical spatial scale as a sensitivity choice, not a calibrated park value.
+SPATIAL_SIGMA_SENSITIVITY_M = (50.0, 100.0, 250.0)
+SPATIAL_SIGMA_PRIOR_SCALE_M = 250.0
 
 # ── SVI optimiser parameters ──────────────────────────────────────────────────
 SVI_LR        = 0.01        # learning rate for Adam optimiser
@@ -341,18 +316,83 @@ TRIGGER_XLIM_MAX    = 200   # x-axis cap (days) for the trimmed trigger-time plo
 N_SIM_TRIGGER       = 500   # Monte-Carlo draws for simulated Δt distribution
 
 # ── File paths (no edits needed below this line) ──────────────────────────────
-ILLEGAL_DUMPING_PATH = os.path.join(OUT,  "illegal_dumping_full.geojson")
-ALL_PARKS_PATH       = os.path.join(OUT,  "all_parks_gdf.geojson")
-ALL_BOXES_PATH       = os.path.join(OUT,  "all_boxes_gdf.geojson")
-COV_CBG_PATH         = os.path.join(OUT,  "cov_cbg.geojson")
+def _resolve_input_path(env_name: str, *candidates: str) -> str:
+    """Resolve an optional override, then the first existing sparse-clone path."""
+    override = os.environ.get(env_name)
+    if override:
+        return os.path.abspath(override)
+    absolute = [os.path.join(ANALYSIS_ROOT, candidate) for candidate in candidates]
+    return next((path for path in absolute if os.path.exists(path)), absolute[0])
+
+
+ILLEGAL_DUMPING_PATH = os.path.join(INPUT_OUT, "illegal_dumping_full.geojson")
+ALL_PARKS_PATH       = os.path.join(INPUT_OUT, "all_parks_gdf.geojson")
+ALL_BOXES_PATH       = os.path.join(INPUT_OUT, "all_boxes_gdf.geojson")
+COV_CBG_PATH         = os.path.join(INPUT_OUT, "cov_cbg.geojson")
 LITTER_DF_PATH       = os.path.join(OUT,  "litter_df_for_model.csv")
 CLEANUP_DF_PATH      = os.path.join(OUT,  "cleanup_df_for_model.csv")
-CITY_LIMITS_PATH     = os.path.join(DATA, "City_Limits", "City_Limits.shp")
-PLANNING_DISTRICTS_PATH = os.path.join(DATA, "Planning_Districts.geojson")
-TIGER_BG_PATH        = os.path.join(DATA, "tiger", "tl_2023_42_bg", "tl_2023_42_bg.shp")
-LAND_CARE_PATH       = os.path.join(DATA, "Land_Care", "phs_landcare.geojson")
-LAND_USE_PATH        = os.path.join(DATA, "Land_Use", "Land_use.geojson")
-VACANT_BLOCK_PATH    = os.path.join(DATA, "Vacant_Block_Percent_Land.geojson")
+CITY_LIMITS_PATH     = _resolve_input_path(
+    "BSTPP_CITY_LIMITS_PATH",
+    os.path.join("data", "City_Limits.shp"),
+    os.path.join("data", "City_Limits", "City_Limits.shp"),
+)
+PLANNING_DISTRICTS_PATH = _resolve_input_path(
+    "BSTPP_PLANNING_DISTRICTS_PATH",
+    os.path.join("data", "Planning_Districts.geojson"),
+    os.path.join("data", "planning_districts.geojson"),
+)
+TIGER_BG_PATH        = _resolve_input_path(
+    "BSTPP_TIGER_BG_PATH",
+    os.path.join("data", "tl_2023_42_bg.shp"),
+    os.path.join("data", "tiger", "tl_2023_42_bg", "tl_2023_42_bg.shp"),
+)
+LAND_CARE_PATH       = _resolve_input_path(
+    "BSTPP_LAND_CARE_PATH",
+    os.path.join("data", "phs_landcare.geojson"),
+    os.path.join("data", "Land_Care", "phs_landcare.geojson"),
+)
+LAND_USE_PATH        = _resolve_input_path(
+    "BSTPP_LAND_USE_PATH",
+    os.path.join("data", "Land_use.geojson"),
+    os.path.join("data", "Land_Use", "Land_use.geojson"),
+)
+VACANT_BLOCK_PATH    = _resolve_input_path(
+    "BSTPP_VACANT_BLOCK_PATH",
+    os.path.join("data", "Vacant_Block_Percent_Land.geojson"),
+)
+
+
+def check_required_inputs(
+    *,
+    use_city: bool = False,
+    use_district: bool = False,
+) -> dict[str, bool]:
+    """Print and validate the input inventory for the selected fit mode."""
+    required = {
+        "illegal_dumping_full": ILLEGAL_DUMPING_PATH,
+        "all_parks_gdf": ALL_PARKS_PATH,
+        "all_boxes_gdf": ALL_BOXES_PATH,
+        "cov_cbg": COV_CBG_PATH,
+    }
+    if use_city:
+        required["city_limits"] = CITY_LIMITS_PATH
+    if use_district:
+        required["planning_districts"] = PLANNING_DISTRICTS_PATH
+
+    inventory = {name: os.path.isfile(path) for name, path in required.items()}
+    print(f"  Analysis input root: {ANALYSIS_ROOT}")
+    for name, path in required.items():
+        state = "FOUND" if inventory[name] else "MISSING"
+        print(f"  [{state}] {name}: {path}")
+
+    missing = [name for name, present in inventory.items() if not present]
+    if missing:
+        raise FileNotFoundError(
+            "Missing required replication inputs: "
+            + ", ".join(missing)
+            + ". See REPLICATION_PRE_S3_HANDOFF.md for sparse-checkout setup."
+        )
+    return inventory
 
 
 # =============================================================================
@@ -499,7 +539,7 @@ def load_supporting_layers(
     # ── City limits ───────────────────────────────────────────────────────────
     if os.path.exists(city_limits_path):
         layers["philly_border"] = gpd.read_file(city_limits_path).to_crs(26918)
-        print(f"  City-limits layer loaded")
+        print("  City-limits layer loaded")
     else:
         print(f"  [WARN] City-limits file not found: {city_limits_path}")
         layers["philly_border"] = None
@@ -748,6 +788,38 @@ def validate_cov_names(
     return active
 
 
+def legacy_citywide_standardize_covariates(
+    cov_gdf: gpd.GeoDataFrame,
+    active_cov_names: list,
+) -> tuple[gpd.GeoDataFrame, dict]:
+    """Apply the historical unweighted population standardization once.
+
+    The legacy package calculated moments over every supplied CBG row before
+    clipping the covariate layer to a fitted park or district. The pre-S3 API
+    rejects ``standardize_cov=True``, so replication must perform that same
+    transformation explicitly and pass ``standardize_cov=None``.
+    """
+    values = cov_gdf[active_cov_names].to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError("Legacy standardization requires finite covariate values")
+    mean = values.mean(axis=0)
+    scale = values.var(axis=0) ** 0.5
+    if np.any(scale <= 0.0):
+        bad = [active_cov_names[i] for i in np.flatnonzero(scale <= 0.0)]
+        raise ValueError(f"Legacy standardization has zero-scale columns: {bad}")
+
+    standardized = cov_gdf.copy()
+    standardized.loc[:, active_cov_names] = (values - mean) / scale
+    record = {
+        "method": "legacy_unweighted_all_supplied_rows",
+        "row_count": int(values.shape[0]),
+        "columns": list(active_cov_names),
+        "mean": mean.tolist(),
+        "scale": scale.tolist(),
+    }
+    return standardized, record
+
+
 # ─── 2-F: Set up and fit the Cox-Hawkes model ────────────────────────────────
 
 def setup_and_fit_model(
@@ -759,12 +831,13 @@ def setup_and_fit_model(
     litter_df: pd.DataFrame | None,
     cleanup_df: pd.DataFrame | None,
     temporal_window: int = 100,
-    spatial_window: float = 0.1,
+    spatial_window: float = SPATIAL_WINDOW,
+    spatial_sigma_prior_scale_m: float = SPATIAL_SIGMA_PRIOR_SCALE_M,
     svi_lr: float = 0.01,
     svi_num_steps: int = 20_000,
-) -> Cox_Hawkes_Shared:
+) -> Hawkes_Model:
     """
-    Construct, configure, and fit a Cox_Hawkes_Shared model via SVI.
+    Construct, configure, and fit a pre-S3 Hawkes_Model via SVI.
 
     Parameters
     ----------
@@ -793,44 +866,56 @@ def setup_and_fit_model(
 
     Returns
     -------
-    Cox_Hawkes_Shared  — fitted model with posterior samples
+    Hawkes_Model  — fitted model with posterior samples
     """
     print("\n[F] Setting up Cox-Hawkes model ...")
-    model = Cox_Hawkes_Shared(
+    cov_gdf_model, standardization_record = legacy_citywide_standardize_covariates(
+        cov_gdf, active_cov_names
+    )
+    model = Hawkes_Model(
         locs_s,
         study_box,
         total_days,
-        True,
-        spatial_cov=cov_gdf,
+        cox_background=True,
+        spatial_cov=cov_gdf_model,
         cov_names=active_cov_names,
-        standardize_cov=True,
+        standardize_cov=None,
+        data_contracts="report",
+        excitation_support="rectangle",
         a_0=dist.Normal(0, 0.5),
         alpha=dist.Beta(2, 4),
+        beta=dist.Exponential(1.0),
+        gamma=dist.Exponential(1.0),
+        sigmax_2=dist.HalfNormal(float(spatial_sigma_prior_scale_m) ** 2),
         temporal_trig=Temporal_Power_Law,
     )
-    model.args["model"] = "cox_hawkes"
 
-    if litter_df is not None:
-        print("  Attaching litter-survey args ...")
-        model.args = attach_litter_survey_args(model, litter_df, "score")
+    model.preview_standardization = standardization_record
+    model.preview_spatial_sigma_prior_scale_m = float(spatial_sigma_prior_scale_m)
 
-    if cleanup_df is not None:
-        print("  Attaching cleanup-report args ...")
-        model.args = attach_dumping_report_args(model, cleanup_df, "log_cleanup_cost")
+    if litter_df is not None or cleanup_df is not None:
+        raise NotImplementedError(
+            "The pre-S3 package does not include the historical shared-model "
+            "litter/cleanup attachment hooks. Remove those optional files for "
+            "the replication preview or migrate them after S3."
+        )
 
     model.set_window(window=temporal_window, spatial_window=spatial_window)
     print(f"  Temporal window: {temporal_window},  spatial window: {spatial_window}")
 
-    print(f"\n[F] Fitting model (lr={svi_lr}, num_steps={svi_num_steps}) ...")
-    model.run_svi(lr=svi_lr, num_steps=svi_num_steps)
-    print("  Fitting complete.")
+    if svi_num_steps > 0:
+        print(f"\n[F] Fitting model (lr={svi_lr}, num_steps={svi_num_steps}) ...")
+        model.run_svi(lr=svi_lr, num_steps=svi_num_steps)
+        print("  Fitting complete.")
+    else:
+        print("  Construction-only check complete (svi_num_steps=0).")
     return model
 
 
 # ─── 2-G: Check covariate fitting ────────────────────────────────────────────
 
 def plot_covariate_check(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     dpi: int = 300,
@@ -841,7 +926,7 @@ def plot_covariate_check(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     prefix : str   figure filename prefix
     fig_out : str  output directory
     dpi : int
@@ -861,7 +946,7 @@ def plot_covariate_check(
 # ─── 2-H: Proportion of excitation ───────────────────────────────────────────
 
 def plot_prop_excitation(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     dpi: int = 300,
@@ -882,7 +967,7 @@ def plot_prop_excitation(
 # ─── 2-I: Trigger posterior ──────────────────────────────────────────────────
 
 def plot_trigger_posterior(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     dpi: int = 300,
@@ -903,7 +988,7 @@ def plot_trigger_posterior(
 # ─── 2-J: Spatial trigger 3-panel ────────────────────────────────────────────
 
 def plot_spatial_trigger_3panel(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     study_box: gpd.GeoDataFrame,
     all_parks_gdf: gpd.GeoDataFrame,
     layers: dict,
@@ -920,7 +1005,7 @@ def plot_spatial_trigger_3panel(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     study_box : GeoDataFrame  (EPSG:26918)
     all_parks_gdf : GeoDataFrame  (EPSG:26918)
     layers : dict  from load_supporting_layers()
@@ -1016,7 +1101,7 @@ def plot_spatial_trigger_3panel(
 # ─── 2-K: Uncertainty surface (non-transparent) ──────────────────────────────
 
 def plot_uncertainty(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     all_parks_gdf: gpd.GeoDataFrame,
     prefix: str,
     fig_out: str,
@@ -1028,7 +1113,7 @@ def plot_uncertainty(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     all_parks_gdf : GeoDataFrame  (EPSG:26918)
         Pre-filtered to the current park/AOI polygon only (not all parks).
     prefix, fig_out, dpi
@@ -1086,7 +1171,7 @@ def plot_uncertainty(
 # ─── 2-L: Colored road network ───────────────────────────────────────────────
 
 def plot_road_network(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     study_box: gpd.GeoDataFrame,
     prefix: str,
     fig_out: str,
@@ -1100,7 +1185,7 @@ def plot_road_network(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     study_box : GeoDataFrame  (EPSG:26918)
     prefix, fig_out, dpi
     """
@@ -1176,7 +1261,7 @@ def plot_road_network(
 # ─── 2-M: Trigger time decay ──────────────────────────────────────────────────
 
 def plot_trigger_time_decay(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     dpi: int = 300,
@@ -1238,7 +1323,7 @@ def plot_freq_time_diff(
 # ─── 2-O: Trigger time distribution (trimmed, observed vs simulated) ──────────
 
 def plot_trigger_time_distribution(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     locs_s: pd.DataFrame,
     park_points: gpd.GeoDataFrame,
     total_days: int,
@@ -1259,7 +1344,7 @@ def plot_trigger_time_distribution(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     locs_s : pd.DataFrame
     park_points : GeoDataFrame
     total_days : int
@@ -1343,7 +1428,7 @@ def plot_trigger_time_distribution(
 # ─── 2-P: Temporal components ─────────────────────────────────────────────────
 
 def plot_temporal_components(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     start_year: int = 2021,
@@ -1356,7 +1441,7 @@ def plot_temporal_components(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     prefix, fig_out, dpi
     start_year : int  calendar year of model baseline (Jan 1 = day 0)
     label_every_n_months : int  tick-label spacing
@@ -1409,7 +1494,7 @@ def plot_temporal_components(
 # ─── 2-Q: Seasonal components ─────────────────────────────────────────────────
 
 def plot_seasonal_components(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     ref_year: int = 2021,
@@ -1421,7 +1506,7 @@ def plot_seasonal_components(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     prefix, fig_out, dpi
     ref_year : int  reference year used to compute month-boundary positions
     """
@@ -1468,6 +1553,7 @@ if __name__ == "__main__":
 
     # ── [1] Load upstream outputs ──────────────────────────────────────────────
     print("\n[1] Loading upstream outputs ...")
+    check_required_inputs(use_city=USE_CITY, use_district=USE_DISTRICT)
     illegal_dumping = gpd.read_file(ILLEGAL_DUMPING_PATH).to_crs(26918)
     all_parks_gdf   = gpd.read_file(ALL_PARKS_PATH).to_crs(26918)
     all_boxes_gdf   = gpd.read_file(ALL_BOXES_PATH).to_crs(26918)
@@ -1484,8 +1570,10 @@ if __name__ == "__main__":
 
     litter_df  = pd.read_csv(LITTER_DF_PATH)  if os.path.exists(LITTER_DF_PATH)  else None
     cleanup_df = pd.read_csv(CLEANUP_DF_PATH) if os.path.exists(CLEANUP_DF_PATH) else None
-    if litter_df  is not None: print(f"  Litter-survey rows:  {len(litter_df):,}")
-    if cleanup_df is not None: print(f"  Cleanup-report rows: {len(cleanup_df):,}")
+    if litter_df is not None:
+        print(f"  Litter-survey rows:  {len(litter_df):,}")
+    if cleanup_df is not None:
+        print(f"  Cleanup-report rows: {len(cleanup_df):,}")
 
     # ── [2] Load supporting spatial layers ─────────────────────────────────────
     print("\n[2] Loading supporting layers ...")
@@ -1574,9 +1662,29 @@ if __name__ == "__main__":
         cleanup_df       = cleanup_df,
         temporal_window  = TEMPORAL_WINDOW,
         spatial_window   = SPATIAL_WINDOW,
+        spatial_sigma_prior_scale_m = SPATIAL_SIGMA_PRIOR_SCALE_M,
         svi_lr           = SVI_LR,
         svi_num_steps    = SVI_NUM_STEPS,
     )
+
+    # PRE-S3 REPLICATION EDIT: keep the provisional analysis choices beside
+    # every figure set so results cannot lose their unit/provenance context.
+    run_config = {
+        "status": "provisional_pre_s3",
+        "bstpp_file": str(Path(bstpp.__file__).resolve()),
+        "analysis_root": ANALYSIS_ROOT,
+        "study_years": STUDY_YEARS,
+        "total_days": int(TOTAL_DAYS),
+        "temporal_window_days": float(TEMPORAL_WINDOW),
+        "spatial_window_m": float(SPATIAL_WINDOW),
+        "spatial_sigma_prior_scale_m": float(SPATIAL_SIGMA_PRIOR_SCALE_M),
+        "standardization": model.preview_standardization,
+        "active_covariates": active_cov_names,
+        "n_events": int(len(locs_s)),
+        "n_pairs": int(model.args["coords"].shape[0]),
+    }
+    with open(os.path.join(FIG_OUT, "run_config.json"), "w", encoding="utf-8") as fh:
+        json.dump(run_config, fh, indent=2)
 
     # ── [7] Generate all figures ───────────────────────────────────────────────
     print("\n[7] Generating figures ...")
