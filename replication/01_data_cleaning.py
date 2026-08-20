@@ -584,9 +584,9 @@ def prep_litter_survey(
     Load litter survey CSV, project to EPSG:26918, align time axis to the
     model's baseline, and restrict to the park box.
 
-    Returns a DataFrame with columns  [X, Y, T, A, score]  ready to pass to
-    ``bstpp.cox_hawkes_shared.attach_litter_survey_args()``, or None if the
-    file is missing.
+    Returns a DataFrame with columns  [X, Y, T, A, score]  ready for optional
+    auxiliary model components, or None if the file is missing.
+    (Not attached by ``03_analysis.py`` under the BSTPP preview API.)
 
     Parameters
     ----------
@@ -650,9 +650,9 @@ def prep_cleanup_data(
     Load the PPR cleanup operations layer from the GDB, project, align the
     time axis, and restrict to the park box.
 
-    Returns a DataFrame with columns  [X, Y, T, A, log_cleanup_cost]  ready
-    for ``bstpp.cox_hawkes_shared.attach_dumping_report_args()``, or None if
-    the GDB is missing.
+    Returns a DataFrame with columns  [X, Y, T, A, log_cleanup_cost], or None
+    if the GDB is missing.
+    (Not attached by ``03_analysis.py`` under the BSTPP preview API.)
 
     Parameters
     ----------

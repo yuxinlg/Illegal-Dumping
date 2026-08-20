@@ -15,8 +15,8 @@ Required inputs  (produced by earlier scripts or provided directly)
   replication/output/all_boxes_gdf.geojson         from 01_data_cleaning.py
   replication/output/cov_cbg.geojson               from 02_covariates.py
 
-Optional inputs
----------------
+Optional inputs (loaded if present; not attached under the preview API)
+------------------------------------------------------------------------
   replication/output/litter_df_for_model.csv       from 01_data_cleaning.py
   replication/output/cleanup_df_for_model.csv      from 01_data_cleaning.py
 
@@ -52,11 +52,28 @@ Outputs  (written to replication/output/figures/{prefix}/)
 # =============================================================================
 
 import os
+import sys
 import warnings
 import calendar
 from datetime import datetime
 
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
+
+# Load BSTPP_preview ahead of any site-packages bstpp. Override with
+# BSTPP_PREVIEW_ROOT if the checkout is not the sibling of this repo.
+_DEFAULT_PREVIEW_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "BSTPP_preview")
+)
+PREVIEW_ROOT = os.path.abspath(
+    os.environ.get("BSTPP_PREVIEW_ROOT", _DEFAULT_PREVIEW_ROOT)
+)
+if not os.path.isdir(PREVIEW_ROOT):
+    raise FileNotFoundError(
+        f"BSTPP preview checkout not found: {PREVIEW_ROOT}\n"
+        "Set BSTPP_PREVIEW_ROOT to the local BSTPP_preview folder."
+    )
+if PREVIEW_ROOT not in sys.path:
+    sys.path.insert(0, PREVIEW_ROOT)
 
 import numpy as np
 import pandas as pd
@@ -73,63 +90,32 @@ from shapely.ops import unary_union
 import numpyro.distributions as dist
 
 import bstpp
-import bstpp.trigger
+from bstpp.main import Hawkes_Model
+from bstpp.trigger import Temporal_Power_Law
 
 # ── bstpp environment verification ────────────────────────────────────────────
-# This analysis requires a CUSTOMIZED version of bstpp that adds the
-# cox_hawkes_shared module (Cox_Hawkes_Shared, attach_litter_survey_args,
-# attach_dumping_report_args).  The standard PyPI package (pip install bstpp)
-# does NOT include this module and will fail here.
-#
-# To verify you are using the correct version, check the path printed below.
-# It should point to your local customized bstpp, NOT the site-packages copy.
-#
-# How to set up the customized bstpp:
-#   Option A — editable install from the local source:
-#       pip install -e /path/to/your/customized/bstpp
-#   Option B — add the parent directory of your customized bstpp to sys.path:
-#       import sys; sys.path.insert(0, "/path/to/customized/")
-#
+# This analysis requires the BSTPP_preview checkout (Hawkes_Model with
+# cox_background=True).  The stock PyPI package and the old cox_hawkes_shared
+# module are not used.
 print(f"  bstpp loaded from: {bstpp.__file__}")
 
-_REQUIRED_CUSTOM = ["cox_hawkes_shared"]
-_REQUIRED_SYMBOLS = {
-    "bstpp.cox_hawkes_shared": ["Cox_Hawkes_Shared",
-                                 "attach_litter_survey_args",
-                                 "attach_dumping_report_args"],
-}
-import importlib as _il
-for _mod_name, _symbols in _REQUIRED_SYMBOLS.items():
-    try:
-        _mod = _il.import_module(_mod_name)
-    except ImportError:
-        raise ImportError(
-            f"\n\n{'='*60}\n"
-            f"WRONG BSTPP VERSION\n"
-            f"{'='*60}\n"
-            f"Module '{_mod_name}' not found in the bstpp loaded from:\n"
-            f"  {bstpp.__file__}\n\n"
-            f"This script requires the CUSTOMIZED bstpp that includes\n"
-            f"cox_hawkes_shared.  The standard PyPI package does not have it.\n"
-            f"See the comment above this block for setup instructions.\n"
-        )
-    for _sym in _symbols:
-        if not hasattr(_mod, _sym):
-            raise AttributeError(
-                f"\n\nCustom symbol '{_sym}' missing from {_mod_name}.\n"
-                f"bstpp loaded from: {bstpp.__file__}\n"
-                f"Make sure you are using the correct customized version.\n"
-            )
-print(f"  bstpp custom modules verified (cox_hawkes_shared OK).")
-del _il, _REQUIRED_CUSTOM, _REQUIRED_SYMBOLS
-
-import bstpp.cox_hawkes_shared
-from bstpp.trigger import Temporal_Power_Law
-from bstpp.cox_hawkes_shared import (
-    Cox_Hawkes_Shared,
-    attach_litter_survey_args,
-    attach_dumping_report_args,
-)
+_preview_norm = os.path.normcase(PREVIEW_ROOT)
+_bstpp_norm = os.path.normcase(os.path.abspath(bstpp.__file__))
+if _preview_norm not in _bstpp_norm:
+    raise ImportError(
+        f"\n\n{'='*60}\n"
+        f"WRONG BSTPP VERSION\n"
+        f"{'='*60}\n"
+        f"bstpp loaded from:\n  {bstpp.__file__}\n\n"
+        f"Expected the BSTPP_preview checkout at:\n  {PREVIEW_ROOT}\n"
+        f"Set BSTPP_PREVIEW_ROOT or `pip install -e` that checkout.\n"
+    )
+if not hasattr(Hawkes_Model, "run_svi"):
+    raise AttributeError(
+        f"Hawkes_Model is missing run_svi.\n"
+        f"bstpp loaded from: {bstpp.__file__}"
+    )
+print("  bstpp preview API verified (Hawkes_Model OK).")
 
 warnings.filterwarnings("ignore")
 
@@ -307,21 +293,24 @@ print(f"  Study years: {STUDY_YEARS}  →  TOTAL_DAYS = {TOTAL_DAYS}")
 # False → no covariate filter; use all events inside the study box.
 FILTER_TO_COV = True
 
-# ── Model window parameters ───────────────────────────────────────────────────
-# These are passed to model.set_window() and directly shape the model's
-# internal representation of space and time.
+# ── Model window / preview construction parameters ────────────────────────────
+# Preview spatial_window is a REAL-metre per-axis square cutoff: pairs are
+# kept iff max(|dx|, |dy|) <= SPATIAL_WINDOW.
+# temporal_cutoff_days is a physical temporal cutoff in real days
+# (preferred over the legacy internal-unit ``window``).
 #
-# TEMPORAL_WINDOW  (int)
-#   Number of temporal grid cells used for the background intensity GP.
-#   Larger values → finer temporal resolution, slower fitting.
-#   Typical range: 50–200.  Default: 100.
-#
-# SPATIAL_WINDOW  (float)
-#   Bandwidth of the spatial background GP (unitless, relative to study box).
-#   Smaller → sharper spatial features; larger → smoother surface.
-#   Typical range: 0.05–0.3.  Default: 0.1.
-TEMPORAL_WINDOW = 0.8       # temporal grid cells for background GP
-SPATIAL_WINDOW  = 0.001       # spatial bandwidth for background GP
+# TEMPORAL_WINDOW is kept so 03a_analysis_by_division.py can still pass it;
+# setup ignores that old relative value and uses TEMPORAL_CUTOFF_DAYS instead.
+TEMPORAL_WINDOW      = None
+TEMPORAL_CUTOFF_DAYS = 90.0     # 3 months
+SPATIAL_WINDOW       = 500.0    # metres; per-axis square excitation cutoff
+
+# Preview-only construction knobs (Hawkes_Model)
+EXCITATION_SUPPORT = "rectangle"   # bounding-rectangle compensator (historical)
+DATA_CONTRACTS     = "report"      # warn on coverage gaps; do not reject
+# Prior on spatial trigger variance sigmax_2 (square metres).  250 m is the
+# provisional default from the BSTPP_preview park-fit template.
+SPATIAL_SIGMA_PRIOR_SCALE_M = 250.0
 
 # ── SVI optimiser parameters ──────────────────────────────────────────────────
 SVI_LR        = 0.01        # learning rate for Adam optimiser
@@ -750,21 +739,62 @@ def validate_cov_names(
 
 # ─── 2-F: Set up and fit the Cox-Hawkes model ────────────────────────────────
 
+def legacy_citywide_standardize_covariates(
+    cov_gdf: gpd.GeoDataFrame,
+    cov_names: list,
+) -> tuple[gpd.GeoDataFrame, dict]:
+    """
+    Reproduce the old package's unweighted all-row z-score.
+
+    Historical fits passed every supplied CBG row with ``standardize_cov=True``,
+    which computed population moments (ddof=0) *before* geographic clipping.
+    BSTPP_preview rejects that boolean, so the same transform is applied here
+    and the result is passed with ``standardize_cov=None``.
+    """
+    values = cov_gdf[cov_names].to_numpy(dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError("Legacy standardization requires finite covariate values")
+    mean = values.mean(axis=0)
+    scale = values.var(axis=0) ** 0.5
+    if np.any(scale <= 0.0):
+        bad = [cov_names[i] for i in np.flatnonzero(scale <= 0.0)]
+        raise ValueError(f"Legacy standardization has zero-scale columns: {bad}")
+
+    standardized = cov_gdf.copy()
+    standardized.loc[:, cov_names] = (values - mean) / scale
+    record = {
+        "method": "legacy_unweighted_all_supplied_rows",
+        "row_count": int(values.shape[0]),
+        "columns": list(cov_names),
+        "mean": mean.tolist(),
+        "scale": scale.tolist(),
+    }
+    return standardized, record
+
+
 def setup_and_fit_model(
     locs_s: pd.DataFrame,
     study_box: gpd.GeoDataFrame,
     total_days: int,
     cov_gdf: gpd.GeoDataFrame,
     active_cov_names: list,
-    litter_df: pd.DataFrame | None,
-    cleanup_df: pd.DataFrame | None,
-    temporal_window: int = 100,
-    spatial_window: float = 0.1,
+    litter_df: pd.DataFrame | None = None,
+    cleanup_df: pd.DataFrame | None = None,
+    temporal_window=None,
+    temporal_cutoff_days: float | None = None,
+    spatial_window: float = 500.0,
     svi_lr: float = 0.01,
     svi_num_steps: int = 20_000,
-) -> Cox_Hawkes_Shared:
+) -> Hawkes_Model:
     """
-    Construct, configure, and fit a Cox_Hawkes_Shared model via SVI.
+    Construct, configure, and fit a Cox-Hawkes model via SVI.
+
+    Uses BSTPP_preview ``Hawkes_Model(cox_background=True)``.  ``litter_df``
+    and ``cleanup_df`` are accepted for call-site compatibility with
+    03a_analysis_by_division.py but are not attached (those helpers lived
+    only in the retired cox_hawkes_shared module).  ``temporal_window`` is
+    the old relative internal cutoff and is ignored; pass
+    ``temporal_cutoff_days`` instead.
 
     Parameters
     ----------
@@ -778,14 +808,12 @@ def setup_and_fit_model(
         CBG covariate panel.
     active_cov_names : list
         Validated covariate column names.
-    litter_df : pd.DataFrame | None
-        Litter-survey data; None skips attachment.
-    cleanup_df : pd.DataFrame | None
-        PPR cleanup data; None skips attachment.
-    temporal_window : int
-        Number of temporal grid cells for the background intensity GP.
+    litter_df, cleanup_df : unused under the preview API.
+    temporal_window : unused (legacy relative units).
+    temporal_cutoff_days : float | None
+        Physical temporal excitation cutoff in days (default: 90 = 3 months).
     spatial_window : float
-        Spatial bandwidth of the background GP (relative to study box).
+        Real-metre per-axis square excitation cutoff.
     svi_lr : float
         Learning rate for the Adam optimiser.
     svi_num_steps : int
@@ -793,44 +821,100 @@ def setup_and_fit_model(
 
     Returns
     -------
-    Cox_Hawkes_Shared  — fitted model with posterior samples
+    Hawkes_Model  — fitted model with posterior samples
     """
-    print("\n[F] Setting up Cox-Hawkes model ...")
-    model = Cox_Hawkes_Shared(
+    print("\n[F] Setting up Cox-Hawkes model (Hawkes_Model, cox_background=True) ...")
+    if litter_df is not None or cleanup_df is not None:
+        print(
+            "  [WARN] litter/cleanup tables were loaded but are not attached "
+            "under the BSTPP preview API."
+        )
+    if temporal_cutoff_days is None:
+        temporal_cutoff_days = TEMPORAL_CUTOFF_DAYS
+
+    cov_gdf_model, std_record = legacy_citywide_standardize_covariates(
+        cov_gdf, active_cov_names
+    )
+    print(
+        f"  Covariate z-score: {std_record['row_count']} CBG rows, "
+        f"{len(std_record['columns'])} columns (legacy citywide moments)"
+    )
+
+    sigma_m = SPATIAL_SIGMA_PRIOR_SCALE_M
+    model = Hawkes_Model(
         locs_s,
         study_box,
         total_days,
-        True,
-        spatial_cov=cov_gdf,
+        cox_background=True,
+        spatial_cov=cov_gdf_model,
         cov_names=active_cov_names,
-        standardize_cov=True,
+        standardize_cov=None,
+        data_contracts=DATA_CONTRACTS,
+        excitation_support=EXCITATION_SUPPORT,
+        spatial_window=spatial_window,
+        temporal_cutoff_days=temporal_cutoff_days,
+        offset_seasonal=OFFSET_SEASONAL,
         a_0=dist.Normal(0, 0.5),
         alpha=dist.Beta(2, 4),
+        beta=dist.Exponential(1.0),
+        gamma=dist.Exponential(1.0),
+        sigmax_2=dist.HalfNormal(float(sigma_m) ** 2),
         temporal_trig=Temporal_Power_Law,
     )
-    model.args["model"] = "cox_hawkes"
-
-    if litter_df is not None:
-        print("  Attaching litter-survey args ...")
-        model.args = attach_litter_survey_args(model, litter_df, "score")
-
-    if cleanup_df is not None:
-        print("  Attaching cleanup-report args ...")
-        model.args = attach_dumping_report_args(model, cleanup_df, "log_cleanup_cost")
-
-    model.set_window(window=temporal_window, spatial_window=spatial_window)
-    print(f"  Temporal window: {temporal_window},  spatial window: {spatial_window}")
+    print(
+        f"  Temporal cutoff: {temporal_cutoff_days:g} days  |  "
+        f"spatial window: {spatial_window:g} m  |  "
+        f"sigmax_2 prior scale: {sigma_m:g} m  |  "
+        f"excitation_support={EXCITATION_SUPPORT}"
+    )
 
     print(f"\n[F] Fitting model (lr={svi_lr}, num_steps={svi_num_steps}) ...")
-    model.run_svi(lr=svi_lr, num_steps=svi_num_steps)
+    model.run_svi(lr=svi_lr, num_steps=svi_num_steps, plot_loss=False)
+    loss = np.asarray(model.svi_results.losses)
+    n_nan = int(np.isnan(loss).sum())
+    n_inf = int(np.isinf(loss).sum())
+    if n_nan or n_inf:
+        print(
+            f"  [WARN] SVI loss is non-finite: {n_nan} NaN, {n_inf} Inf "
+            f"of {len(loss)} steps (package does not halt on this)."
+        )
+    else:
+        print(
+            f"  SVI loss finite for all {len(loss)} steps; "
+            f"final={float(loss[-1]):.2f}"
+        )
     print("  Fitting complete.")
     return model
+
+
+def plot_svi_loss(
+    model: Hawkes_Model,
+    prefix: str,
+    fig_out: str,
+    dpi: int = 300,
+) -> None:
+    """Save the SVI loss curve (package plot_loss=True only calls plt.show)."""
+    print("\n[F] Plotting SVI loss ...")
+    loss = np.asarray(model.svi_results.losses)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    start = int(0.01 * len(loss))
+    if start < len(loss):
+        ax.plot(np.arange(start, len(loss)), loss[start:])
+    ax.set_xlabel("SVI iteration")
+    ax.set_ylabel("Loss (−ELBO)")
+    ax.set_title(f"{prefix} SVI loss")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    out_path = os.path.join(fig_out, f"{prefix}_svi_loss.png")
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved → {out_path}")
 
 
 # ─── 2-G: Check covariate fitting ────────────────────────────────────────────
 
 def plot_covariate_check(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     dpi: int = 300,
@@ -841,7 +925,7 @@ def plot_covariate_check(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     prefix : str   figure filename prefix
     fig_out : str  output directory
     dpi : int
@@ -861,7 +945,7 @@ def plot_covariate_check(
 # ─── 2-H: Proportion of excitation ───────────────────────────────────────────
 
 def plot_prop_excitation(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     dpi: int = 300,
@@ -882,7 +966,7 @@ def plot_prop_excitation(
 # ─── 2-I: Trigger posterior ──────────────────────────────────────────────────
 
 def plot_trigger_posterior(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     dpi: int = 300,
@@ -903,7 +987,7 @@ def plot_trigger_posterior(
 # ─── 2-J: Spatial trigger 3-panel ────────────────────────────────────────────
 
 def plot_spatial_trigger_3panel(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     study_box: gpd.GeoDataFrame,
     all_parks_gdf: gpd.GeoDataFrame,
     layers: dict,
@@ -920,7 +1004,7 @@ def plot_spatial_trigger_3panel(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     study_box : GeoDataFrame  (EPSG:26918)
     all_parks_gdf : GeoDataFrame  (EPSG:26918)
     layers : dict  from load_supporting_layers()
@@ -1016,7 +1100,7 @@ def plot_spatial_trigger_3panel(
 # ─── 2-K: Uncertainty surface (non-transparent) ──────────────────────────────
 
 def plot_uncertainty(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     all_parks_gdf: gpd.GeoDataFrame,
     prefix: str,
     fig_out: str,
@@ -1028,7 +1112,7 @@ def plot_uncertainty(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     all_parks_gdf : GeoDataFrame  (EPSG:26918)
         Pre-filtered to the current park/AOI polygon only (not all parks).
     prefix, fig_out, dpi
@@ -1086,7 +1170,7 @@ def plot_uncertainty(
 # ─── 2-L: Colored road network ───────────────────────────────────────────────
 
 def plot_road_network(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     study_box: gpd.GeoDataFrame,
     prefix: str,
     fig_out: str,
@@ -1100,7 +1184,7 @@ def plot_road_network(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     study_box : GeoDataFrame  (EPSG:26918)
     prefix, fig_out, dpi
     """
@@ -1176,7 +1260,7 @@ def plot_road_network(
 # ─── 2-M: Trigger time decay ──────────────────────────────────────────────────
 
 def plot_trigger_time_decay(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     dpi: int = 300,
@@ -1238,7 +1322,7 @@ def plot_freq_time_diff(
 # ─── 2-O: Trigger time distribution (trimmed, observed vs simulated) ──────────
 
 def plot_trigger_time_distribution(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     locs_s: pd.DataFrame,
     park_points: gpd.GeoDataFrame,
     total_days: int,
@@ -1259,7 +1343,7 @@ def plot_trigger_time_distribution(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     locs_s : pd.DataFrame
     park_points : GeoDataFrame
     total_days : int
@@ -1290,7 +1374,7 @@ def plot_trigger_time_distribution(
         name: float(np.array(model.samples[name]).mean())
         for name in par_names
     }
-    tpl   = Temporal_Power_Law(locs_s)
+    tpl   = model.args["t_trig"]
     scale = total_days / 50.0
 
     bin_width    = (max_val - min_val) / 1200.0
@@ -1343,7 +1427,7 @@ def plot_trigger_time_distribution(
 # ─── 2-P: Temporal components ─────────────────────────────────────────────────
 
 def plot_temporal_components(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     start_year: int = 2021,
@@ -1356,7 +1440,7 @@ def plot_temporal_components(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     prefix, fig_out, dpi
     start_year : int  calendar year of model baseline (Jan 1 = day 0)
     label_every_n_months : int  tick-label spacing
@@ -1409,7 +1493,7 @@ def plot_temporal_components(
 # ─── 2-Q: Seasonal components ─────────────────────────────────────────────────
 
 def plot_seasonal_components(
-    model: Cox_Hawkes_Shared,
+    model: Hawkes_Model,
     prefix: str,
     fig_out: str,
     ref_year: int = 2021,
@@ -1421,7 +1505,7 @@ def plot_seasonal_components(
 
     Parameters
     ----------
-    model : Cox_Hawkes_Shared
+    model : Hawkes_Model
     prefix, fig_out, dpi
     ref_year : int  reference year used to compute month-boundary positions
     """
@@ -1484,8 +1568,10 @@ if __name__ == "__main__":
 
     litter_df  = pd.read_csv(LITTER_DF_PATH)  if os.path.exists(LITTER_DF_PATH)  else None
     cleanup_df = pd.read_csv(CLEANUP_DF_PATH) if os.path.exists(CLEANUP_DF_PATH) else None
-    if litter_df  is not None: print(f"  Litter-survey rows:  {len(litter_df):,}")
-    if cleanup_df is not None: print(f"  Cleanup-report rows: {len(cleanup_df):,}")
+    if litter_df is not None:
+        print(f"  Litter-survey rows:  {len(litter_df):,} (loaded; unused under preview API)")
+    if cleanup_df is not None:
+        print(f"  Cleanup-report rows: {len(cleanup_df):,} (loaded; unused under preview API)")
 
     # ── [2] Load supporting spatial layers ─────────────────────────────────────
     print("\n[2] Loading supporting layers ...")
@@ -1570,16 +1656,18 @@ if __name__ == "__main__":
         total_days       = TOTAL_DAYS,
         cov_gdf          = cov_gdf,
         active_cov_names = active_cov_names,
-        litter_df        = litter_df,
-        cleanup_df       = cleanup_df,
-        temporal_window  = TEMPORAL_WINDOW,
-        spatial_window   = SPATIAL_WINDOW,
-        svi_lr           = SVI_LR,
-        svi_num_steps    = SVI_NUM_STEPS,
+        litter_df            = litter_df,
+        cleanup_df           = cleanup_df,
+        temporal_cutoff_days = TEMPORAL_CUTOFF_DAYS,
+        spatial_window       = SPATIAL_WINDOW,
+        svi_lr               = SVI_LR,
+        svi_num_steps        = SVI_NUM_STEPS,
     )
 
     # ── [7] Generate all figures ───────────────────────────────────────────────
     print("\n[7] Generating figures ...")
+
+    plot_svi_loss(model, prefix, FIG_OUT, FIG_DPI)
 
     plot_covariate_check(model, prefix, FIG_OUT, FIG_DPI)
 
@@ -1636,8 +1724,8 @@ if __name__ == "__main__":
     print(f"  Baseline date:    {baseline_time.date()}")
     print(f"  Events in locs_s: {len(locs_s):,}")
     print(f"  Covariates used:  {len(active_cov_names)}")
-    print(f"  Litter survey:    {'yes' if litter_df  is not None else 'not found'}")
-    print(f"  Cleanup data:     {'yes' if cleanup_df is not None else 'not found'}")
+    print(f"  Litter survey:    {'loaded (unused under preview API)' if litter_df  is not None else 'not found'}")
+    print(f"  Cleanup data:     {'loaded (unused under preview API)' if cleanup_df is not None else 'not found'}")
     print(f"  Road network:     {'plotted' if PLOT_ROAD_NETWORK else 'skipped'}")
     print(f"\nFigures written to: {FIG_OUT}/")  
     print("Done.")

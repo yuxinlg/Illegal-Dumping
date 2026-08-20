@@ -37,12 +37,24 @@ pip install -r requirements.txt
 
 ### 2. BSTPP package
 
-This study uses a modified version of the BSTPP package. Install it separately
-before running the scripts (instructions to be added once the package repo is
-finalised):
+This study uses the customized BSTPP preview checkout (`BSTPP_preview`),
+not the stock PyPI package. `03_analysis.py` prepends that checkout to
+`sys.path` and constructs Cox–Hawkes as
+`Hawkes_Model(..., cox_background=True)`.
+
+The old `cox_hawkes_shared` module is **not** on GitHub and is not used.
+
+Default location (sibling of this analysis repo):
+
+```text
+C:\Users\Terhi\dev\BSTPP_preview
+```
+
+Override with the environment variable `BSTPP_PREVIEW_ROOT`, or install
+editable from that checkout:
 
 ```bash
-# pip install git+https://github.com/yuxinlg/BSTPP-for-illegal-dumping.git
+pip install -e C:\Users\Terhi\dev\BSTPP_preview
 ```
 
 ---
