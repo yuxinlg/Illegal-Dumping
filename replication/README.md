@@ -37,10 +37,17 @@ pip install -r requirements.txt
 
 ### 2. BSTPP package
 
-This study uses the customized BSTPP preview checkout (`BSTPP_preview`),
-not the stock PyPI package. `03_analysis.py` prepends that checkout to
-`sys.path` and constructs Cox–Hawkes as
-`Hawkes_Model(..., cox_background=True)`.
+This study uses the customized BSTPP preview checkout, not the stock PyPI
+package. The package is a **separate repo**:
+[yuxinlg/BSTPP-for-illegal-dumping](https://github.com/yuxinlg/BSTPP-for-illegal-dumping)
+branch **`preview`**.
+
+Park-analysis runners (notebook, `batch_park_fits.py`) live in this
+Illegal-Dumping repo on branch **`preview/parks`**. District `03_analysis.py`
+work is on **`preview/analysis`**.
+
+`03_analysis.py` prepends the BSTPP checkout to `sys.path` and constructs
+Cox–Hawkes as `Hawkes_Model(..., cox_background=True)`.
 
 The old `cox_hawkes_shared` module is **not** on GitHub and is not used.
 
