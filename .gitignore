@@ -46,3 +46,6 @@ slides/
 # ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+
+# transient download caches (05 diagnostics)
+replication/.cache/

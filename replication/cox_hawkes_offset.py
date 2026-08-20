@@ -7,7 +7,8 @@ free-coefficient) per-CBG offset in the background log-intensity.
     log mu(s,t) = a_0 + f_t + f_a + f_xy + X.w + gamma * offset(s)
 
 where offset(s) is the log reporting-thinning log p(s) estimated by
-04_reporting_decomposition.py, and gamma is either pinned at 1 (a true
+05a_streetlight_decomposition.py (formerly 04's per-district decomposition,
+now archived), and gamma is either pinned at 1 (a true
 thinning/filter, the main spec) or given a prior (robustness spec: gamma ~ 1
 validates the correction from the point-process side).
 
@@ -363,4 +364,11 @@ class Cox_Hawkes_Shared_Offset(Cox_Hawkes_Shared):
         pars = super().get_params()
         if self.args.get("offset_coef_prior") is not None:
             pars["offset_coef"] = 1
+        # bstpp's Hawkes_Model.get_params omits the b_0 deterministic (unlike
+        # the Point_Process_Model base), so SVI never returns samples['b_0']
+        # and plot_spatial(include_cov=True) raises KeyError. Register it
+        # here. Note the deterministic is X@w only — the offset term is added
+        # after registration, so plotted surfaces show the covariate field.
+        if "spatial_cov" in self.args:
+            pars["b_0"] = 0
         return pars

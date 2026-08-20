@@ -1,9 +1,13 @@
 # Citywide Street-Light Decomposition with Pole-Inventory Exposure
 
-Documentation for `05b_corrected_hawkes_streetlight.py`.
+Documentation for `05a_streetlight_decomposition.py` (formerly
+`05b_corrected_hawkes_streetlight.py`; renamed 2026-07-30 when it became the
+standalone PREREQUISITE of `05_corrected_hawkes_by_district.py` — the
+Cox-Hawkes driver stage was moved into 05 itself, and 04's count/exposure
+builders were absorbed here since 04 is archived).
 This note records what changed in this move, why, the full model, and the
 validation evidence. It supersedes the street-light-variant description in
-`05_corrected_hawkes.md` §1 (the "05b" column of its run table): the sl run is
+`05_corrected_hawkes.md` §1: the sl run is
 no longer a per-district refit of 04 — it is a single citywide fit with a new
 exposure for the NT equation.
 
@@ -442,9 +446,9 @@ offset field is comparatively flat), same as before.
 
 | file | status | role |
 |---|---|---|
-| `05b_corrected_hawkes_streetlight.py` | rewritten | pole EDA + join, citywide two-exposure fit, PSIP robustness, offset override, Cox-Hawkes driver |
-| `04_reporting_decomposition.py` | untouched | count/exposure builders reused as modules; its own per-district spec-A run is unaffected |
-| `05_corrected_hawkes_by_district.py` | untouched | Cox-Hawkes batch reused; its `build_offset` is replaced in memory by the citywide version |
+| `05a_streetlight_decomposition.py` | current (renamed from `05b_…`) | pole EDA + join, citywide two-exposure fit, PSIP robustness; 04's count/exposure/choropleth builders absorbed; decomposition only — no Cox-Hawkes driver |
+| `archive/04_reporting_decomposition.py` | archived | superseded per-district decomposition (outputs under `archive/output/`) |
+| `05_corrected_hawkes_by_district.py` | downstream | reads this script's outputs directly (`build_offset` = β·ŵ_R); fits all 18 districts |
 | `cox_hawkes_offset.py`, `~/BSTPP`, 03/03a | untouched | hard constraint |
 | `output/corrected_hawkes_streetlight/reporting_decomp_cbg_sl.geojson` | overwritten | citywide per-CBG `w_R`/`w_T` (+ `w_R_mean_pre24`, pole columns) |
 | `…/reporting_decomp_city_summary_sl.csv` | new | two rows: full-window and pre-24 citywide scalars |

@@ -1,11 +1,10 @@
 """
-05b_corrected_hawkes_streetlight.py
-====================================
-Street-light-only, CITYWIDE variant of the reporting-corrected Cox-Hawkes
-pipeline. Documented in 05b_streetlight_citywide.md.
+05a_streetlight_decomposition.py
+================================
+Citywide street-light reporting decomposition — the PREREQUISITE for
+05_corrected_hawkes_by_district.py. Documented in 05a_streetlight_citywide.md.
 
-Compared to the earlier version of this script (which re-ran 04's per-district
-decomposition with NT = Street Light Outage), this version:
+What it does:
 
   1. Fits ONE citywide two-equation decomposition over all Philadelphia CBGs —
      no per-district beta_d / a_NT,d, no cross-district anchor scalar. Every
@@ -19,35 +18,39 @@ decomposition with NT = Street Light Outage), this version:
      study window's tail, so true breakage fell non-uniformly during 2024-25):
        - pre-conversion time slice: refit with NT counts from 2021-2023 only;
        - LED-share sensitivity: corr(w_R, per-CBG LED / pre-2024-relit share).
-  4. Feeds the simpler citywide offset  beta * w_R_i  into the per-district
-     Cox-Hawkes fits (baseline / offset_fixed / offset_free) for Central
-     (Center City) and University Southwest (University City).
 
-No existing file is modified: 04 and 05 are loaded as modules; 04's count /
-exposure builders are reused as-is; 05's district-based build_offset is
-replaced in memory with the citywide version.
+Downstream, 05_corrected_hawkes_by_district.py reads this script's outputs
+(reporting_decomp_cbg_sl.geojson + reporting_decomp_city_summary_sl.csv) and
+builds the per-CBG reporting offset  beta * w_R_i  for its per-district
+Cox-Hawkes fits. This script is self-contained: the CBG count / exposure /
+district builders formerly imported from 04_reporting_decomposition.py (now
+archived under archive/) are absorbed below.
 
 Usage
 -----
-  python 05b_corrected_hawkes_streetlight.py [decomp|hawkes|all]   (default all)
+  python 05a_streetlight_decomposition.py
+
+Inputs
+------
+  data/311/{2021..2025}/public_cases_fc.shp     geolocated 311 reports
+  data/tiger/tl_2023_42_bg/tl_2023_42_bg.shp    2023 census block groups
+  data/Planning_Districts.geojson               18 planning districts
+  data/Street_Poles.geojson                     street-pole inventory
+  output/cov_cbg.geojson                        exposure (alloc_avg_s_cnt)
 
 Outputs
 -------
   output/corrected_hawkes_streetlight/
     reporting_decomp_cbg_sl.geojson            citywide decomposition per CBG
-    reporting_decomp_city_summary_sl.csv       one row: a_NT, a_T, beta, sigmas
+    reporting_decomp_city_summary_sl.csv       specs sl / sl_pre24: beta etc.
     reporting_decomp_*_districtfit.*           archived pre-refactor outputs
     poles_cbg.geojson                          poles per CBG + LED/PECO shares
     pole_eda_*.csv                             EDA tables
     validation_summary.csv                     all validation correlations
-    offset_cbg.geojson, fit_summary.csv/.geojson, cbg_fxy.geojson  (05 outputs)
   output/figures/corrected_hawkes_streetlight/*.png
 """
 
 import os
-import sys
-import shutil
-import importlib.util
 import warnings
 
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
@@ -78,7 +81,6 @@ os.makedirs(RUN_OUT, exist_ok=True)
 os.makedirs(FIG_OUT, exist_ok=True)
 
 NT_STREETLIGHT = ["Street Light Outage"]
-FIT_DISTRICTS  = ["Central", "University Southwest"]   # Center City, University City
 
 POLES_PATH   = os.path.join(DATA, "Street_Poles.geojson")
 PSIP_CUTOFF  = pd.Timestamp("2024-01-01", tz="UTC")    # mass LED relighting starts
@@ -89,7 +91,7 @@ CITY_SUMMARY_PATH = os.path.join(RUN_OUT, "reporting_decomp_city_summary_sl.csv"
 POLES_CBG_PATH    = os.path.join(RUN_OUT, "poles_cbg.geojson")
 VALIDATION_PATH   = os.path.join(RUN_OUT, "validation_summary.csv")
 
-# same MCMC settings as 04, one citywide run instead of 18 district runs
+# same MCMC settings as the archived 04, one citywide run instead of 18
 MCMC_WARMUP  = 1000
 MCMC_SAMPLES = 1000
 MCMC_CHAINS  = 1
@@ -97,12 +99,157 @@ MCMC_SEED    = 0
 
 FIG_DPI = 300
 
+# ── constants absorbed from archive/04_reporting_decomposition.py ────────────
+STUDY_YEARS = [2021, 2022, 2023, 2024, 2025]
 
-def _load(fname, name):
-    spec = importlib.util.spec_from_file_location(name, os.path.join(REPL_DIR, fname))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+NT_CURATED = list(NT_STREETLIGHT)   # NT = Street Light Outage only
+
+# Spec B companion count (kept verbatim from 04; the NT_all column is written
+# but not used as the headline NT here).
+NT_ALL_EXCLUDE = [
+    "Illegal Dumping",
+    "Information Request",
+    "Rubbish/Recyclable Material Collection",
+    "Sanitation Violation",
+    "Dumpster Violation",
+    "Sanitation / Dumpster Violation",
+]
+
+PLANNING_DISTRICTS_PATH  = os.path.join(DATA, "Planning_Districts.geojson")
+PLANNING_DISTRICT_ID_COL = "dist_name"
+
+EXPOSURE_COL = "alloc_avg_s_cnt"    # SafeGraph avg monthly stop counts (cov_cbg)
+
+TIGER_BG_PATH = os.path.join(DATA, "tiger", "tl_2023_42_bg", "tl_2023_42_bg.shp")
+COV_CBG_PATH  = os.path.join(OUT, "cov_cbg.geojson")
+
+
+# =============================================================================
+# SECTION 0 - CBG counts / exposure / district assignment (absorbed from 04)
+# =============================================================================
+
+def build_cbg_counts(study_years=None) -> gpd.GeoDataFrame:
+    """
+    Count T (Illegal Dumping), NT_curated and NT_all 311 reports per 2023 CBG,
+    pooled over study_years (default STUDY_YEARS).  Returns the Philadelphia
+    CBG GeoDataFrame (EPSG:26918) with count columns T, NT_curated, NT_all.
+    """
+    if study_years is None:
+        study_years = STUDY_YEARS
+    print(f"\n[counts] Counting 311 reports per CBG (years {study_years}) ...")
+
+    pa_2023      = gpd.read_file(TIGER_BG_PATH)
+    philly_26918 = pa_2023[pa_2023["COUNTYFP"] == "101"].to_crs(26918)
+    philly_26918["GEOID"] = philly_26918["GEOID"].astype(str)
+    print(f"  {len(philly_26918)} Philadelphia CBGs loaded.")
+
+    parts = []
+    for yr in study_years:
+        shp_path = os.path.join(DATA, "311", str(yr), "public_cases_fc.shp")
+        if not os.path.exists(shp_path):
+            print(f"  [SKIP] {shp_path} not found.")
+            continue
+        gdf = gpd.read_file(shp_path, columns=["service_na"])
+        gdf = gdf[gdf["geometry"].notna()].to_crs(26918)
+        print(f"  {yr}: {len(gdf):,} geolocated 311 records")
+        parts.append(gdf)
+
+    if not parts:
+        raise FileNotFoundError(
+            "No public 311 shapefiles found under data/311/{year}/."
+        )
+    all_311 = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=26918)
+
+    # classify each record into the count groups (curated is a subset of all)
+    svc = all_311["service_na"]
+    all_311["is_T"]      = svc == "Illegal Dumping"
+    all_311["is_NT_cur"] = svc.isin(NT_CURATED)
+    all_311["is_NT_all"] = ~svc.isin(NT_ALL_EXCLUDE)
+
+    joined = all_311.sjoin(
+        philly_26918[["GEOID", "geometry"]], how="inner", predicate="within"
+    )
+    counts = joined.groupby("GEOID")[["is_T", "is_NT_cur", "is_NT_all"]].sum()
+    counts.columns = ["T_count", "NT_curated", "NT_all"]
+
+    out = philly_26918[["GEOID", "geometry"]].merge(
+        counts.reset_index(), on="GEOID", how="left"
+    )
+    for c in ["T_count", "NT_curated", "NT_all"]:
+        out[c] = out[c].fillna(0).astype(int)
+
+    print(f"  Totals — T: {out['T_count'].sum():,}  "
+          f"NT_curated: {out['NT_curated'].sum():,}  "
+          f"NT_all: {out['NT_all'].sum():,}")
+    return gpd.GeoDataFrame(out, geometry="geometry", crs=26918)
+
+
+def attach_exposure_and_district(cbg: gpd.GeoDataFrame):
+    """
+    Merge the exposure column from cov_cbg.geojson (population fallback when
+    the foot-traffic column is entirely absent) and assign each CBG to the
+    planning district containing its representative point.
+    """
+    print("\n[exposure] Attaching exposure and planning district ...")
+
+    cov = gpd.read_file(COV_CBG_PATH)
+    cov["GEOID"] = cov["GEOID"].astype(str)
+
+    if EXPOSURE_COL in cov.columns:
+        expo = cov[["GEOID", EXPOSURE_COL]].rename(columns={EXPOSURE_COL: "exposure"})
+        print(f"  Exposure: {EXPOSURE_COL} (SafeGraph foot traffic)")
+    else:
+        # population fallback: pop_density [per km2] x CBG area [km2]
+        cov_pop = cov[["GEOID", "pop_density"]].merge(
+            cbg[["GEOID"]].assign(area_km2=cbg.geometry.area / 1e6),
+            on="GEOID", how="right",
+        )
+        cov_pop["exposure"] = cov_pop["pop_density"] * cov_pop["area_km2"]
+        expo = cov_pop[["GEOID", "exposure"]]
+        print(f"  Exposure: population (fallback — '{EXPOSURE_COL}' absent from cov_cbg)")
+
+    cbg = cbg.merge(expo, on="GEOID", how="left")
+
+    # keep the existing reporting_rate covariate for validation, if present
+    if "reporting_rate" in cov.columns:
+        cbg = cbg.merge(cov[["GEOID", "reporting_rate"]], on="GEOID", how="left")
+
+    districts = gpd.read_file(PLANNING_DISTRICTS_PATH).to_crs(26918)
+    rep_pts = cbg.copy()
+    rep_pts["geometry"] = cbg.geometry.representative_point()
+    assign = gpd.sjoin(
+        rep_pts[["GEOID", "geometry"]],
+        districts[[PLANNING_DISTRICT_ID_COL, "geometry"]],
+        how="left", predicate="within",
+    )[["GEOID", PLANNING_DISTRICT_ID_COL]]
+    cbg = cbg.merge(assign, on="GEOID", how="left")
+
+    n_no_dist = cbg[PLANNING_DISTRICT_ID_COL].isna().sum()
+    n_no_expo = (~(cbg["exposure"] > 0)).sum()
+    print(f"  CBGs without district: {n_no_dist}   "
+          f"CBGs with missing/zero exposure (excluded from fits): {n_no_expo}")
+    return cbg, districts
+
+
+def plot_choropleth(gdf, column, title, out_path, dpi=300,
+                    cmap="viridis", boundary_overlay=None):
+    """Single choropleth PNG (same helper style as 03a)."""
+    if column not in gdf.columns or gdf[column].dropna().empty:
+        print(f"  [skip] '{column}' has no data to map.")
+        return
+    fig, ax = plt.subplots(figsize=(9, 9))
+    gdf.plot(
+        column=column, ax=ax, legend=True, cmap=cmap,
+        edgecolor="white", linewidth=0.2,
+        missing_kwds={"color": "lightgray", "label": "no data"},
+    )
+    if boundary_overlay is not None:
+        boundary_overlay.boundary.plot(ax=ax, color="black", linewidth=0.8)
+    ax.set_title(title)
+    ax.set_axis_off()
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved → {out_path}")
 
 
 # =============================================================================
@@ -185,7 +332,7 @@ def pole_eda(poles: gpd.GeoDataFrame):
 
 
 def join_poles_to_cbg(poles: gpd.GeoDataFrame, cbg: gpd.GeoDataFrame,
-                      districts: gpd.GeoDataFrame, mod04) -> gpd.GeoDataFrame:
+                      districts: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Spatial join poles → CBGs; returns cbg with n_poles / led_share /
     pre24_share / peco_share columns. Also writes poles_cbg.geojson + maps."""
     print("\n[poles] Joining poles to CBGs ...")
@@ -232,12 +379,12 @@ def join_poles_to_cbg(poles: gpd.GeoDataFrame, cbg: gpd.GeoDataFrame,
         POLES_CBG_PATH, driver="GeoJSON")
     print(f"  Saved → {POLES_CBG_PATH}")
 
-    mod04.plot_choropleth(
+    plot_choropleth(
         cbg, "n_poles", title="Street poles per CBG (all owners)",
         out_path=os.path.join(FIG_OUT, "pole_map_per_cbg.png"),
         dpi=FIG_DPI, boundary_overlay=districts,
     )
-    mod04.plot_choropleth(
+    plot_choropleth(
         cbg, "led_share", title="LED share of poles per CBG (bulb_type = LED)",
         out_path=os.path.join(FIG_OUT, "pole_map_led_share.png"),
         dpi=FIG_DPI, cmap="magma", boundary_overlay=districts,
@@ -441,39 +588,25 @@ def run_validation(cbg: gpd.GeoDataFrame, archive_cbg_path: str):
 
 def run_decomposition():
     print("\n" + "=" * 60)
-    print("STEP 1 — citywide W_R decomposition, NT = Street Light Outage,")
-    print("         poles as NT exposure (single fit, no district layer)")
+    print("05a — citywide W_R decomposition, NT = Street Light Outage,")
+    print("      poles as NT exposure (single fit, no district layer)")
     print("=" * 60)
-    mod04 = _load("04_reporting_decomposition.py", "reporting_decomposition")
-    mod04.NT_CURATED = NT_STREETLIGHT      # 04 reads this at call time
-
-    # archive the pre-refactor (district-wise) outputs once, for comparison
+    # pre-refactor (district-wise) outputs, kept for the validation comparison
     archive_cbg = DECOMP_CBG_PATH.replace(".geojson", "_districtfit.geojson")
-    old_district_summary = os.path.join(RUN_OUT, "reporting_decomp_district_summary_sl.csv")
-    for src, dst in [
-        (DECOMP_CBG_PATH, archive_cbg),
-        (old_district_summary, old_district_summary.replace(".csv", "_districtfit.csv")),
-    ]:
-        if os.path.exists(src) and not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            print(f"  Archived pre-refactor output → {dst}")
 
     # counts: full window, then the pre-conversion NT slice (2021-2023)
-    counts = mod04.build_cbg_counts()
-    full_years = list(mod04.STUDY_YEARS)
-    mod04.STUDY_YEARS = PRE24_YEARS
-    counts_pre = mod04.build_cbg_counts()[["GEOID", "NT_curated"]].rename(
+    counts = build_cbg_counts()
+    counts_pre = build_cbg_counts(PRE24_YEARS)[["GEOID", "NT_curated"]].rename(
         columns={"NT_curated": "NT_pre24"})
-    mod04.STUDY_YEARS = full_years
     counts = counts.merge(counts_pre, on="GEOID", how="left")
     counts["NT_pre24"] = counts["NT_pre24"].fillna(0).astype(int)
 
-    cbg, districts = mod04.attach_exposure_and_district(counts)
+    cbg, districts = attach_exposure_and_district(counts)
 
-    # STEP 0: pole inventory
+    # pole inventory
     poles = load_poles()
     pole_eda(poles)
-    cbg = join_poles_to_cbg(poles, cbg, districts, mod04)
+    cbg = join_poles_to_cbg(poles, cbg, districts)
 
     fit_mask = (cbg["exposure"] > 0) & (cbg["n_poles"] > 0)
     sub = cbg[fit_mask]
@@ -515,13 +648,13 @@ def run_decomposition():
     print(f"  Saved → {CITY_SUMMARY_PATH}")
 
     # figures: citywide maps (directly comparable across all CBGs) + PPC
-    mod04.plot_choropleth(
+    plot_choropleth(
         cbg, "w_R_mean_sl",
         title="Reporting propensity w_R (citywide fit, poles as NT exposure)",
         out_path=os.path.join(FIG_OUT, "sl_map_w_R.png"),
         dpi=FIG_DPI, boundary_overlay=districts,
     )
-    mod04.plot_choropleth(
+    plot_choropleth(
         cbg, "w_T_mean_sl",
         title="Reporting-corrected dumping w_T (citywide fit)",
         out_path=os.path.join(FIG_OUT, "sl_map_w_T.png"),
@@ -548,58 +681,5 @@ def run_decomposition():
     run_validation(cbg, archive_cbg)
 
 
-# =============================================================================
-# SECTION 5 - STEP 2: Cox-Hawkes with the citywide offset
-# =============================================================================
-
-def build_offset_citywide(cov_gdf, ch05):
-    """Replaces 05's district-based build_offset: offset_i = beta * w_R_i.
-    With a single citywide fit there is no district layer — the level is
-    absorbed identically everywhere by a_0."""
-    print("\n[offset] Building citywide reporting offset  beta * w_R ...")
-    decomp = gpd.read_file(DECOMP_CBG_PATH)[["GEOID", "dist_name", "w_R_mean_sl"]]
-    decomp["GEOID"] = decomp["GEOID"].astype(str)
-    city = pd.read_csv(CITY_SUMMARY_PATH)
-    beta = float(city.loc[city["spec"] == "sl", "beta_mean"].iloc[0])
-    print(f"  beta (citywide) = {beta:.4f}")
-
-    decomp[ch05.OFFSET_COL] = beta * decomp["w_R_mean_sl"]
-    cov_gdf = cov_gdf.merge(decomp[["GEOID", "dist_name", ch05.OFFSET_COL]],
-                            on="GEOID", how="left")
-    n_missing = int(cov_gdf[ch05.OFFSET_COL].isna().sum())
-    cov_gdf[ch05.OFFSET_COL] = cov_gdf[ch05.OFFSET_COL].fillna(0.0)
-    print(f"  Offset merged: {len(cov_gdf) - n_missing}/{len(cov_gdf)} CBGs; "
-          f"{n_missing} filled with 0 (the citywide mean)")
-    print(f"  Offset range: [{cov_gdf[ch05.OFFSET_COL].min():.3f}, "
-          f"{cov_gdf[ch05.OFFSET_COL].max():.3f}]")
-
-    # dsum kept API-compatible with 05's main(); corrected_level is retired —
-    # NaN makes the downstream a_0-vs-corrected_level figure skip itself.
-    dsum = pd.DataFrame({
-        "dist_name": decomp["dist_name"].dropna().unique(),
-        "corrected_level_mean": np.nan,
-    })
-    return cov_gdf, dsum
-
-
-def run_cox_hawkes():
-    print("\n" + "=" * 60)
-    print(f"STEP 2 — Cox-Hawkes with citywide street-light offset: {FIT_DISTRICTS}")
-    print("=" * 60)
-    ch05 = _load("05_corrected_hawkes_by_district.py", "corrected_hawkes")
-
-    ch05.RUN_NAME = RUN_NAME
-    ch05.RUN_OUT  = RUN_OUT
-    ch05.FIG_OUT  = FIG_OUT
-    ch05.UNIT_SUBSET = FIT_DISTRICTS
-    ch05.build_offset = lambda cov_gdf: build_offset_citywide(cov_gdf, ch05)
-
-    ch05.main()
-
-
 if __name__ == "__main__":
-    step = sys.argv[1] if len(sys.argv) > 1 else "all"
-    if step in ("decomp", "all"):
-        run_decomposition()
-    if step in ("hawkes", "all"):
-        run_cox_hawkes()
+    run_decomposition()

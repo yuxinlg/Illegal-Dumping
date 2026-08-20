@@ -1,18 +1,18 @@
 """
 05_corrected_hawkes_by_district.py
 ===================================
-Reporting-corrected Cox-Hawkes fits per planning district: implements the
-"downstream hook" of 04_reporting_decomposition.md §7 by injecting the log
-reporting-thinning offset
+Reporting-corrected Cox-Hawkes fits per planning district (all 18 by
+default). Injects the log reporting-thinning offset
 
-    offset_i = beta_d * ( w_R_i + a_NT_d - a_bar )      [log p(s), per CBG]
+    offset_i = beta * w_R_i          [log p(s), per CBG]
 
 into the background intensity of the per-district Cox-Hawkes model
-(03a_analysis_by_division.py's planning-district mode). The offset is built
-from the existing 04 spec-A outputs — computed per district (each district's
-own beta_d, a_NT_d, w_R field) but anchored to the single citywide NT rate
-a_bar, so it is on one citywide-comparable scale. See
-05_corrected_hawkes.md for the full derivation and interpretation.
+(03a_analysis_by_division.py's planning-district mode). The offset comes
+from 05a_streetlight_decomposition.py's single CITYWIDE decomposition
+(NT = Street Light Outage, poles as exposure): one citywide beta and a
+per-CBG w_R field that is directly comparable across the whole city, so no
+district-level anchor term is needed — a constant level shift is absorbed
+by each district's a_0. See 05_corrected_hawkes.md for derivation.
 
 Three specs per district:
   baseline      — no offset (re-fit: unlike the old 03a run, `reporting_rate`
@@ -22,24 +22,34 @@ Three specs per district:
   offset_free   — offset coefficient ~ Normal(1, 0.5) (robustness: gamma ~ 1
                   validates the correction from the point-process side)
 
-No existing file is modified: the offset-aware model lives in
-cox_hawkes_offset.py (new), and this script re-uses 03/03a functions by
-loading them as modules.
+For every district, the full 03-style diagnostic figure set (temporal +
+seasonal components, self-excitation / trigger figures, covariate forest,
+spatial surface, uncertainty, road network, Δt distributions) is rendered
+for the baseline and offset_fixed fits under
+output/figures/{RUN_NAME}/districts/{district}/{spec}/, plus per-district
+Δ f_xy_norm maps (offset_fixed − baseline, CBG + native grid) at each
+district folder's top level.
+
+The offset-aware model lives in cox_hawkes_offset.py; this script re-uses
+03/03a functions by loading them as modules.
 
 Required inputs
 ----------------
   replication/output/illegal_dumping_full.geojson         01_data_cleaning.py
   replication/output/cov_cbg.geojson                      02_covariates.py
-  replication/output/reporting_decomp_cbg.geojson         04_reporting_decomposition.py
-  replication/output/reporting_decomp_district_summary.csv          "
+  replication/output/corrected_hawkes_streetlight/
+      reporting_decomp_cbg_sl.geojson                     05a
+      reporting_decomp_city_summary_sl.csv                05a
   replication/data/Planning_Districts.geojson
 
 Outputs (per run, RUN_NAME = "corrected_hawkes" by default)
 -------
   output/{RUN_NAME}/fit_summary.csv / .geojson            district x spec
   output/{RUN_NAME}/cbg_fxy.geojson                       CBG mosaic, all specs
+  output/{RUN_NAME}/grid_fxy.geojson                      native-grid mosaic
   output/{RUN_NAME}/offset_cbg.geojson                    the offset itself
-  output/figures/{RUN_NAME}/*.png                         maps + diagnostics
+  output/figures/{RUN_NAME}/*.png                         citywide maps
+  output/figures/{RUN_NAME}/districts/*/                  per-district figures
 """
 
 # =============================================================================
@@ -67,8 +77,7 @@ REPL_DIR = os.path.dirname(os.path.abspath(__file__))   # replication/
 OUT      = os.path.join(REPL_DIR, "output")
 
 # Each run writes its data files into output/{RUN_NAME}/ and its figures into
-# output/figures/{RUN_NAME}/ (a driver like 05b overrides RUN_OUT/FIG_OUT
-# before calling main()).
+# output/figures/{RUN_NAME}/.
 RUN_NAME = "corrected_hawkes"
 RUN_OUT  = os.path.join(OUT, RUN_NAME)
 FIG_OUT  = os.path.join(OUT, "figures", RUN_NAME)
@@ -87,6 +96,7 @@ validate_cov_names             = base.validate_cov_names
 build_unit_study_box = div.build_unit_study_box
 extract_fit_stats    = div.extract_fit_stats
 extract_cbg_fxy      = div.extract_cbg_fxy
+extract_grid_fxy     = div.extract_grid_fxy
 plot_choropleth      = div.plot_choropleth
 
 sys.path.insert(0, REPL_DIR)
@@ -112,13 +122,12 @@ SPATIAL_WINDOW  = 0.025
 PLANNING_DISTRICTS_PATH  = os.path.join(REPL_DIR, "data", "Planning_Districts.geojson")
 PLANNING_DISTRICT_ID_COL = "dist_name"
 
-# 04 outputs feeding the offset (spec A = curated NT categories). A driver
-# can point these at a different decomposition run (e.g. 05b's
-# street-light-only refit) and set DECOMP_SPEC to its spec key.
-DECOMP_CBG_PATH      = os.path.join(OUT, "reporting_decomp_cbg.geojson")
-DECOMP_DISTRICT_PATH = os.path.join(OUT, "reporting_decomp_district_summary.csv")
-DECOMP_SPEC          = "a"                # spec key used for w_R / beta / a_NT
-DECOMP_NT_COL        = "NT_curated"       # count column behind that spec (for ā)
+# 05a citywide streetlight-decomposition outputs feeding the offset.
+DECOMP_DIR        = os.path.join(OUT, "corrected_hawkes_streetlight")
+DECOMP_CBG_PATH   = os.path.join(DECOMP_DIR, "reporting_decomp_cbg_sl.geojson")
+CITY_SUMMARY_PATH = os.path.join(DECOMP_DIR, "reporting_decomp_city_summary_sl.csv")
+DECOMP_SPEC       = "sl"                  # "sl_pre24" = PSIP-robust variant
+DECOMP_WR_COL     = {"sl": "w_R_mean_sl", "sl_pre24": "w_R_mean_pre24"}[DECOMP_SPEC]
 
 OFFSET_COL       = "log_p_report"         # column added to the covariate gdf
 FREE_COEF_PRIOR  = dist.Normal(1.0, 0.5)  # offset_free spec
@@ -139,62 +148,91 @@ RUN_EQUIVALENCE_CHECK = False
 
 FIG_DPI = 300
 
+# ── Per-district 03-style diagnostic figures ─────────────────────────────────
+MAKE_DISTRICT_DIAGNOSTICS = True
+DIAG_SPECS        = ["baseline", "offset_fixed"]   # specs that get figure sets
+PLOT_ROAD_NETWORK = True        # OSMnx download per district (disk-cached)
+N_SIM_TRIGGER     = 500         # MC draws for the Δt-distribution figure
+                                # (dominant runtime cost; 100 = fast mode)
+MAKE_GRID_FXY_MAP = True        # citywide native-grid f_xy mosaic maps
+
+
+def slug(name: str) -> str:
+    """Filename-safe district id: 'University Southwest' → 'university_southwest'."""
+    return name.lower().replace(" ", "_")
+
+
+# Disk caches so the road-network / basemap figures download each district's
+# data once, not once per spec. Kept out of output/ — these are transient
+# download caches, not analysis outputs.
+CACHE_DIR = os.path.join(REPL_DIR, ".cache")
+try:
+    import osmnx as ox
+    ox.settings.use_cache = True
+    ox.settings.cache_folder = os.path.join(CACHE_DIR, "osmnx")
+except ImportError:
+    pass
+if hasattr(base, "ctx"):
+    try:
+        base.ctx.set_cache_dir(os.path.join(CACHE_DIR, "contextily"))
+    except Exception:
+        pass
+
 
 # =============================================================================
-# SECTION 2 - Offset construction (per district, citywide-anchored)
+# SECTION 2 - Offset construction (citywide streetlight decomposition, 05a)
 # =============================================================================
 
-def build_offset(cov_gdf: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, pd.DataFrame]:
+def build_offset(cov_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Compute offset_i = beta_d * (w_R_i + a_NT_d - a_bar) from the 04 spec-A
-    outputs and merge it into cov_gdf as OFFSET_COL.
+    Compute offset_i = beta * w_R_i from 05a's citywide streetlight
+    decomposition and merge it into cov_gdf as OFFSET_COL.
 
-    Two layers, both scaled by the district's loading beta_d:
-      * within-district: w_R_i, CBG i's log reporting-propensity deviation
-        from its district mean (04 centres it at 0 within each district);
-      * district: a_NT_d - a_bar, the district's propensity level relative
-        to the citywide NT rate a_bar = log(sum NT_i / sum E_i). The anchor
-        a_bar puts all 18 districts on one ruler; within a single district
-        fit this layer is constant and lands in a_0, which is what makes the
-        fitted a_0's comparable across districts as corrected levels.
+    The decomposition is a single citywide fit, so w_R is directly comparable
+    across all CBGs and one beta applies everywhere. There is no district
+    level term: a citywide-constant shift is absorbed identically by each
+    district's a_0, leaving the fitted a_0's comparable across districts.
 
-    CBGs without a 04 estimate get their district's mean offset, else 0.
-    Returns (cov_gdf with OFFSET_COL, per-district merge table for logging).
+    CBGs without a decomposition estimate get 0 (the citywide mean).
     """
-    print("\n[offset] Building citywide-anchored reporting offset ...")
-    w_r_col = f"w_R_mean_{DECOMP_SPEC}"
+    print("\n[offset] Building citywide reporting offset  beta * w_R ...")
     decomp = gpd.read_file(DECOMP_CBG_PATH)[
-        ["GEOID", DECOMP_NT_COL, "exposure", "dist_name", w_r_col]
+        ["GEOID", "dist_name", DECOMP_WR_COL, "T_count"]
     ]
-    dsum = pd.read_csv(DECOMP_DISTRICT_PATH)
-    dsum = dsum[dsum["spec"] == DECOMP_SPEC][
-        ["dist_name", "beta_mean", "a_NT_mean", "corrected_level_mean"]
-    ]
+    decomp["GEOID"] = decomp["GEOID"].astype(str)
+    city = pd.read_csv(CITY_SUMMARY_PATH)
+    beta = float(city.loc[city["spec"] == DECOMP_SPEC, "beta_mean"].iloc[0])
+    print(f"  beta (citywide, spec '{DECOMP_SPEC}') = {beta:.4f}")
 
-    # citywide anchor: log of the city's NT reports per unit exposure, over
-    # the same CBGs the decomposition fit (exposure > 0, assigned district)
-    valid = (decomp["exposure"] > 0) & decomp["dist_name"].notna()
-    a_bar = np.log(decomp.loc[valid, DECOMP_NT_COL].sum()
-                   / decomp.loc[valid, "exposure"].sum())
-    print(f"  a_bar (citywide log NT rate, {DECOMP_NT_COL}) = {a_bar:.4f}")
+    decomp[OFFSET_COL] = beta * decomp[DECOMP_WR_COL]
+    cov_gdf = cov_gdf.merge(
+        decomp[["GEOID", "dist_name", OFFSET_COL, "T_count"]],
+        on="GEOID", how="left",
+    )
 
-    m = decomp.merge(dsum, on="dist_name", how="left")
-    m[OFFSET_COL] = m["beta_mean"] * (m[w_r_col] + m["a_NT_mean"] - a_bar)
-
-    cov_gdf = cov_gdf.merge(m[["GEOID", "dist_name", OFFSET_COL]],
-                            on="GEOID", how="left")
-
-    # fill: district mean, then 0
     n_missing = int(cov_gdf[OFFSET_COL].isna().sum())
-    dist_means = cov_gdf.groupby("dist_name")[OFFSET_COL].transform("mean")
-    cov_gdf[OFFSET_COL] = cov_gdf[OFFSET_COL].fillna(dist_means).fillna(0.0)
+    cov_gdf[OFFSET_COL] = cov_gdf[OFFSET_COL].fillna(0.0)
+    cov_gdf["T_count"] = cov_gdf["T_count"].fillna(0.0)
     print(f"  Offset merged: {len(cov_gdf) - n_missing}/{len(cov_gdf)} CBGs "
-          f"from 04; {n_missing} filled (district mean, else 0)")
+          f"from 05a; {n_missing} filled with 0 (the citywide mean)")
     print(f"  Offset range: [{cov_gdf[OFFSET_COL].min():.3f}, "
           f"{cov_gdf[OFFSET_COL].max():.3f}], "
           f"mean {cov_gdf[OFFSET_COL].mean():.3f}")
 
-    return cov_gdf, dsum.assign(a_bar=a_bar)
+    # Human-readable unit: how many of a CBG's observed reports are
+    # attributable to reporting bias rather than true dumping, on an
+    # absolute-count scale (see 05_corrected_hawkes.md for the offset's
+    # log-rate derivation).
+    cov_gdf["excess_reports"] = (
+        cov_gdf["T_count"] - cov_gdf["T_count"] / np.exp(cov_gdf[OFFSET_COL])
+    )
+    print(f"  Excess reports (bias-attributable) range: "
+          f"[{cov_gdf['excess_reports'].min():.1f}, "
+          f"{cov_gdf['excess_reports'].max():.1f}], "
+          f"total {cov_gdf['excess_reports'].sum():.1f} of "
+          f"{cov_gdf['T_count'].sum():,.0f} citywide reports")
+
+    return cov_gdf
 
 
 # =============================================================================
@@ -309,6 +347,53 @@ def run_equivalence_check(illegal_dumping, cov_gdf, districts, active_cov_names)
 
 
 # =============================================================================
+# SECTION 4b - Per-district 03-style diagnostic figures
+# =============================================================================
+
+def make_district_diagnostics(model, spec, study_box, park_points, locs_s,
+                              layers, dist_dir, dist_slug):
+    """
+    Render the full 03_analysis.py diagnostic figure set for one fitted
+    (district, spec) model under {dist_dir}/{spec}/, prefixed
+    {dist_slug}_{spec}. Each figure is wrapped in its own try/except so a
+    plotting failure (e.g. a network outage for the basemap / OSMnx figures)
+    never marks the fit itself as failed.
+
+    study_box doubles as the boundary-overlay GeoDataFrame, exactly as 03's
+    own district mode does (03_analysis.py builds current_park_gdf from
+    study_box when USE_DISTRICT is on).
+    """
+    spec_dir = os.path.join(dist_dir, spec)
+    os.makedirs(spec_dir, exist_ok=True)
+    prefix = f"{dist_slug}_{spec}"
+    print(f"  [{spec}] diagnostics → {spec_dir}")
+
+    def _try(fn, *args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            traceback.print_exc()
+
+    _try(base.plot_covariate_check, model, prefix, spec_dir, FIG_DPI)
+    _try(base.plot_prop_excitation, model, prefix, spec_dir, FIG_DPI)
+    _try(base.plot_trigger_posterior, model, prefix, spec_dir, FIG_DPI)
+    _try(base.plot_spatial_trigger_3panel,
+         model, study_box, study_box, layers, prefix, spec_dir, FIG_DPI)
+    _try(base.plot_uncertainty, model, study_box, prefix, spec_dir, FIG_DPI)
+    if PLOT_ROAD_NETWORK:
+        _try(base.plot_road_network, model, study_box, prefix, spec_dir, FIG_DPI)
+    _try(base.plot_trigger_time_decay, model, prefix, spec_dir, FIG_DPI)
+    _try(base.plot_trigger_time_distribution,
+         model=model, locs_s=locs_s, park_points=park_points,
+         total_days=TOTAL_DAYS, prefix=prefix, fig_out=spec_dir,
+         dpi=FIG_DPI, n_sim=N_SIM_TRIGGER, xlim_max=base.TRIGGER_XLIM_MAX)
+    _try(base.plot_temporal_components, model, prefix, spec_dir,
+         start_year=base.TEMPORAL_START_YEAR, dpi=FIG_DPI)
+    _try(base.plot_seasonal_components, model, prefix, spec_dir,
+         ref_year=base.SEASONAL_REF_YEAR, dpi=FIG_DPI)
+
+
+# =============================================================================
 # SECTION 5 - Main batch: districts × specs
 # =============================================================================
 
@@ -323,10 +408,21 @@ def main():
     if UNIT_SUBSET is not None:
         districts = districts[districts[PLANNING_DISTRICT_ID_COL].isin(UNIT_SUBSET)].copy()
 
-    cov_gdf, dsum = build_offset(cov_gdf)
+    cov_gdf = build_offset(cov_gdf)
     active_cov_names = validate_cov_names(COV_NAMES, cov_gdf)
     print(f"  Districts: {len(districts)}, specs: {SPECS}, "
           f"covariates: {len(active_cov_names)} (reporting_rate dropped)")
+    if MAKE_DISTRICT_DIAGNOSTICS and len(districts) > 2:
+        print(f"  [note] per-district diagnostics ON for {len(districts)} districts "
+              f"× {DIAG_SPECS} — expect a multi-hour run "
+              f"(N_SIM_TRIGGER={N_SIM_TRIGGER}, road network={PLOT_ROAD_NETWORK}).")
+
+    layers = None
+    if MAKE_DISTRICT_DIAGNOSTICS:
+        layers = base.load_supporting_layers(
+            base.TIGER_BG_PATH, base.LAND_CARE_PATH, base.LAND_USE_PATH,
+            base.VACANT_BLOCK_PATH, base.CITY_LIMITS_PATH,
+        )
 
     # save the offset itself (map + record of what was fed to the model)
     off_path = os.path.join(RUN_OUT, "offset_cbg.geojson")
@@ -335,9 +431,16 @@ def main():
     print(f"  Saved offset → {off_path}")
     plot_choropleth(
         cov_gdf, OFFSET_COL,
-        title="Log reporting-thinning offset  β_d(ŵ_R + â_NT,d − ā)  by CBG",
+        title="Log reporting-thinning offset  β·ŵ_R  (citywide streetlight decomposition)",
         out_path=os.path.join(FIG_OUT, "ch_map_offset_cbg.png"),
         dpi=FIG_DPI, cmap="RdBu_r", boundary_overlay=districts,
+    )
+    plot_delta_map(
+        cov_gdf, "excess_reports",
+        title="Citywide: Excess 311 Reports Attributable to Reporting Bias\n"
+              "(observed T_count − expected true count), CBG",
+        out_path=os.path.join(FIG_OUT, "ch_map_excess_reports_cbg.png"),
+        boundary=districts, dpi=FIG_DPI,
     )
 
     if RUN_EQUIVALENCE_CHECK:
@@ -345,14 +448,15 @@ def main():
 
     print("\n[2] Fitting districts × specs ...")
     rows = []
-    cbg_fxy = {s: [] for s in SPECS}
+    cbg_fxy  = {s: [] for s in SPECS}
+    grid_fxy = {s: [] for s in DIAG_SPECS}
     for _, district in districts.iterrows():
         unit_id = district[PLANNING_DISTRICT_ID_COL]
         print(f"\n--- District: {unit_id} ---")
 
         try:
             study_box = build_unit_study_box(district["geometry"], unit_id, districts.crs)
-            _, locs_s, _ = filter_events_and_build_locs_s(
+            park_points, locs_s, _ = filter_events_and_build_locs_s(
                 illegal_dumping=illegal_dumping, study_box=study_box,
                 cov_gdf=cov_gdf if base.FILTER_TO_COV else None,
                 filter_to_cov=base.FILTER_TO_COV,
@@ -365,6 +469,15 @@ def main():
                              "status": "failed", "error": f"event prep: {exc}"})
             traceback.print_exc()
             continue
+
+        dist_slug = slug(unit_id)
+        dist_dir  = os.path.join(FIG_OUT, "districts", dist_slug)
+        if MAKE_DISTRICT_DIAGNOSTICS:
+            os.makedirs(dist_dir, exist_ok=True)
+            try:  # data-only figure — identical across specs, made once
+                base.plot_freq_time_diff(park_points, dist_slug, dist_dir, FIG_DPI)
+            except Exception:
+                traceback.print_exc()
 
         for spec in SPECS:
             print(f"  [{spec}]")
@@ -382,8 +495,18 @@ def main():
                 row.update(a_0_stats(model))
                 row.update(offset_coef_stats(model))
                 fxy = extract_cbg_fxy(model, district["geometry"], cov_gdf, districts.crs)
-                cbg_fxy[spec].append(fxy.assign(spec=spec))
+                cbg_fxy[spec].append(
+                    fxy.assign(spec=spec, **{PLANNING_DISTRICT_ID_COL: unit_id}))
+                if MAKE_GRID_FXY_MAP and spec in grid_fxy:
+                    gfx = extract_grid_fxy(model, district["geometry"], districts.crs)
+                    grid_fxy[spec].append(
+                        gfx.assign(spec=spec, **{PLANNING_DISTRICT_ID_COL: unit_id}))
                 row["status"], row["error"] = "fit", None
+                if MAKE_DISTRICT_DIAGNOSTICS and spec in DIAG_SPECS:
+                    make_district_diagnostics(
+                        model, spec, study_box, park_points, locs_s,
+                        layers, dist_dir, dist_slug,
+                    )
             except Exception as exc:
                 row["status"], row["error"] = "failed", str(exc)
                 traceback.print_exc()
@@ -391,10 +514,8 @@ def main():
             rows.append(row)
             plt.close("all")
 
-    summary = pd.DataFrame(rows).merge(
-        dsum[["dist_name", "corrected_level_mean"]], on="dist_name", how="left"
-    )
-    summary = gpd.GeoDataFrame(summary, geometry="geometry", crs=districts.crs)
+    summary = gpd.GeoDataFrame(pd.DataFrame(rows), geometry="geometry",
+                               crs=districts.crs)
 
     out_geojson = os.path.join(RUN_OUT, "fit_summary.geojson")
     out_csv     = os.path.join(RUN_OUT, "fit_summary.csv")
@@ -402,7 +523,7 @@ def main():
     summary.drop(columns="geometry").to_csv(out_csv, index=False)
     print(f"\nSaved summary → {out_geojson}, {out_csv}")
 
-    make_outputs(summary, cbg_fxy, districts)
+    make_outputs(summary, cbg_fxy, districts, grid_fxy)
 
     n_fit = int((summary["status"] == "fit").sum())
     print(f"\nDone. {n_fit}/{len(summary)} fits successful.")
@@ -412,17 +533,116 @@ def main():
 # SECTION 6 - Mosaics and comparison figures
 # =============================================================================
 
-def make_outputs(summary, cbg_fxy, districts):
+def plot_delta_map(gdf, column, title, out_path, boundary, dpi):
+    """
+    Diverging choropleth for a delta column, color scale symmetric about 0
+    (plot_choropleth doesn't center its colormap, which is misleading for
+    signed deltas on a single district).
+    """
+    vals = gdf[column].dropna()
+    if vals.empty:
+        print(f"  [skip] '{column}' has no data to map.")
+        return
+    a = float(np.abs(vals).max()) or 1e-9
+    fig, ax = plt.subplots(figsize=(9, 9))
+    gdf.plot(
+        column=column, ax=ax, legend=True, cmap="RdBu_r", vmin=-a, vmax=a,
+        edgecolor="white", linewidth=0.2,
+        missing_kwds={"color": "lightgray", "label": "no data"},
+    )
+    if boundary is not None:
+        boundary.boundary.plot(ax=ax, color="black", linewidth=0.8)
+    ax.set_title(title)
+    ax.set_axis_off()
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved → {out_path}")
+
+
+def make_district_delta_figures(cbg_by_spec, grid_by_spec, districts):
+    """
+    Per-district Δ f_xy_norm maps (offset_fixed − baseline, both normalized
+    0–1 within the district) saved into each district's own figure folder:
+
+        districts/{slug}/{slug}_f_xy_norm_delta_cbg.png     CBG aggregation
+        districts/{slug}/{slug}_f_xy_norm_delta_grid.png    native model grid
+
+    cbg_by_spec / grid_by_spec are {spec: GeoDataFrame} with a
+    PLANNING_DISTRICT_ID_COL column, PRE-dedup so boundary CBGs shared by
+    two districts keep each district's own within-district normalization.
+    CBG rows merge on GEOID; grid cells have no id, so they merge on
+    geometry (WKB) — baseline and offset_fixed share the district's
+    comp_grid, so the clipped cells are identical across specs.
+    """
+    have_cbg  = all(s in cbg_by_spec for s in ("baseline", "offset_fixed"))
+    have_grid = all(s in grid_by_spec for s in ("baseline", "offset_fixed"))
+    if not (have_cbg or have_grid):
+        return
+    print("  Per-district Δ f_xy_norm maps ...")
+    for _, district in districts.iterrows():
+        unit_id   = district[PLANNING_DISTRICT_ID_COL]
+        dist_slug = slug(unit_id)
+        dist_dir  = os.path.join(FIG_OUT, "districts", dist_slug)
+        os.makedirs(dist_dir, exist_ok=True)
+        boundary = gpd.GeoDataFrame(geometry=[district["geometry"]],
+                                    crs=districts.crs)
+
+        if have_cbg:
+            b = cbg_by_spec["baseline"]
+            c = cbg_by_spec["offset_fixed"]
+            b = b[b[PLANNING_DISTRICT_ID_COL] == unit_id]
+            c = c[c[PLANNING_DISTRICT_ID_COL] == unit_id]
+            if len(b) and len(c):
+                d = b[["GEOID", "f_xy_norm", "geometry"]].merge(
+                    c[["GEOID", "f_xy_norm"]],
+                    on="GEOID", suffixes=("_base", "_corr"))
+                d["f_xy_norm_delta"] = d["f_xy_norm_corr"] - d["f_xy_norm_base"]
+                plot_delta_map(
+                    gpd.GeoDataFrame(d, geometry="geometry", crs=districts.crs),
+                    "f_xy_norm_delta",
+                    title=f"{unit_id}: Δ f_xy_norm (corrected − baseline), CBG\n"
+                          f"+ = hotter after reporting correction",
+                    out_path=os.path.join(
+                        dist_dir, f"{dist_slug}_f_xy_norm_delta_cbg.png"),
+                    boundary=boundary, dpi=FIG_DPI,
+                )
+
+        if have_grid:
+            b = grid_by_spec["baseline"]
+            c = grid_by_spec["offset_fixed"]
+            b = b[b[PLANNING_DISTRICT_ID_COL] == unit_id].copy()
+            c = c[c[PLANNING_DISTRICT_ID_COL] == unit_id].copy()
+            if len(b) and len(c):
+                b["_cell"] = b.geometry.apply(lambda g: g.wkb)
+                c["_cell"] = c.geometry.apply(lambda g: g.wkb)
+                d = b[["_cell", "f_xy_norm", "geometry"]].merge(
+                    c[["_cell", "f_xy_norm"]],
+                    on="_cell", suffixes=("_base", "_corr")).drop(columns="_cell")
+                d["f_xy_norm_delta"] = d["f_xy_norm_corr"] - d["f_xy_norm_base"]
+                plot_delta_map(
+                    gpd.GeoDataFrame(d, geometry="geometry", crs=districts.crs),
+                    "f_xy_norm_delta",
+                    title=f"{unit_id}: Δ f_xy_norm (corrected − baseline), "
+                          f"native grid\n+ = hotter after reporting correction",
+                    out_path=os.path.join(
+                        dist_dir, f"{dist_slug}_f_xy_norm_delta_grid.png"),
+                    boundary=boundary, dpi=FIG_DPI,
+                )
+
+
+def make_outputs(summary, cbg_fxy, districts, grid_fxy=None):
     print("\n[3] Mosaics and comparison figures ...")
 
     # ── CBG f_xy mosaics, one geojson with a spec column ──────────────────────
     mosaics = {}
+    cbg_full = {}   # pre-dedup, keeps every district's own copy of shared CBGs
     frames = []
     for spec in SPECS:
         if not cbg_fxy[spec]:
             continue
         m = pd.concat(cbg_fxy[spec], ignore_index=True)
         m = gpd.GeoDataFrame(m, geometry="geometry", crs=districts.crs)
+        cbg_full[spec] = m
         m = m.drop_duplicates(subset="GEOID", keep="first")
         mosaics[spec] = m
         frames.append(m)
@@ -442,6 +662,31 @@ def make_outputs(summary, cbg_fxy, districts):
                 dpi=FIG_DPI, cmap="viridis", boundary_overlay=districts,
             )
 
+    # ── native-grid mosaics (smoother sub-CBG texture, same normalization) ───
+    grid_full = {}
+    if grid_fxy:
+        grid_frames = []
+        for spec, parts in grid_fxy.items():
+            if not parts:
+                continue
+            g = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True),
+                                 geometry="geometry", crs=districts.crs)
+            grid_full[spec] = g
+            grid_frames.append(g)
+            plot_choropleth(
+                g, "f_xy_norm",
+                title=f"Spatial surface f_xy ({spec}, native grid, "
+                      f"normalized within district)",
+                out_path=os.path.join(FIG_OUT, f"ch_map_f_xy_norm_{spec}_grid.png"),
+                dpi=FIG_DPI, cmap="viridis", boundary_overlay=districts,
+            )
+        if grid_frames:
+            all_g = gpd.GeoDataFrame(pd.concat(grid_frames, ignore_index=True),
+                                     geometry="geometry", crs=districts.crs)
+            path = os.path.join(RUN_OUT, "grid_fxy.geojson")
+            all_g.to_crs(4326).to_file(path, driver="GeoJSON")
+            print(f"  Saved → {path}")
+
     # ── (a) delta map: corrected − baseline (both within-district 0–1) ────────
     if "baseline" in mosaics and "offset_fixed" in mosaics:
         d = mosaics["baseline"][["GEOID", "f_xy_norm", "geometry"]].merge(
@@ -457,9 +702,12 @@ def make_outputs(summary, cbg_fxy, districts):
             dpi=FIG_DPI, cmap="RdBu_r", boundary_overlay=districts,
         )
 
+    # ── (a2) per-district delta maps, into each district's own folder ─────────
+    make_district_delta_figures(cbg_full, grid_full, districts)
+
     ok = summary[summary["status"] == "fit"]
 
-    # ── (b) corrected a_0 district map + scatter vs 04's corrected_level ─────
+    # ── (b) corrected a_0 district map ────────────────────────────────────────
     fixed = ok[ok["spec"] == "offset_fixed"]
     if len(fixed):
         plot_choropleth(
@@ -469,21 +717,6 @@ def make_outputs(summary, cbg_fxy, districts):
             out_path=os.path.join(FIG_OUT, "ch_map_a_0_offset_fixed.png"),
             dpi=FIG_DPI,
         )
-        v = fixed.dropna(subset=["corrected_level_mean", "a_0_mean"])
-        if len(v) > 2:
-            r = np.corrcoef(v["corrected_level_mean"], v["a_0_mean"])[0, 1]
-            fig, ax = plt.subplots(figsize=(6, 6))
-            ax.scatter(v["corrected_level_mean"], v["a_0_mean"])
-            for _, rw in v.iterrows():
-                ax.annotate(rw["dist_name"], (rw["corrected_level_mean"], rw["a_0_mean"]),
-                            fontsize=6, alpha=0.8)
-            ax.set_xlabel("04 corrected_level_mean (decomposition)")
-            ax.set_ylabel("a_0 mean (offset_fixed Cox-Hawkes)")
-            ax.set_title(f"Corrected levels: decomposition vs Cox-Hawkes (r={r:.2f})")
-            fig.savefig(os.path.join(FIG_OUT, "ch_scatter_a0_vs_corrected_level.png"),
-                        dpi=FIG_DPI, bbox_inches="tight")
-            plt.close(fig)
-            print(f"  a_0 vs corrected_level r = {r:.3f}")
 
     # ── (c) alpha / excitation-share shift ────────────────────────────────────
     piv = ok.pivot_table(index="dist_name", columns="spec",

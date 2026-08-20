@@ -1,25 +1,47 @@
 # Reporting-Corrected Cox-Hawkes Fits by Planning District
 
-Documentation for `[05_corrected_hawkes_by_district.py](05_corrected_hawkes_by_district.py)`,
-the supporting model module `[cox_hawkes_offset.py](cox_hawkes_offset.py)`, and the
-street-light-only variant driver `[05b_corrected_hawkes_streetlight.py](05b_corrected_hawkes_streetlight.py)`.
+Documentation for `[05_corrected_hawkes_by_district.py](05_corrected_hawkes_by_district.py)`
+and the supporting model module `[cox_hawkes_offset.py](cox_hawkes_offset.py)`.
 
-Two runs, each in its own folder under `output/` (figures mirror the layout
-under `output/figures/`):
+> **Note (2026-07-30) — current pipeline.** The pipeline was restructured:
+>
+> * `04_reporting_decomposition.py` (per-district decomposition) is
+>   **archived** under `archive/`, together with its outputs. Its
+>   count/exposure/district builders were absorbed into
+>   `05a_streetlight_decomposition.py`.
+> * `05b_corrected_hawkes_streetlight.py` was renamed
+>   **`05a_streetlight_decomposition.py`** and reduced to the citywide
+>   streetlight decomposition only (documented in
+>   `05a_streetlight_citywide.md`). It is the **prerequisite** of 05.
+> * `05_corrected_hawkes_by_district.py` is now standalone: it reads 05a's
+>   `reporting_decomp_cbg_sl.geojson` / `reporting_decomp_city_summary_sl.csv`
+>   and builds the offset **`offset_i = β·ŵ_R,i`** — the two-layer,
+>   district-anchored formula of §2 below (β_d(ŵ_R + â_NT,d − ā)) is
+>   **historical**: with one citywide decomposition there is a single β, ŵ_R
+>   is citywide-comparable, and the level term is constant (absorbed by each
+>   district's a₀). Sections referring to 04's per-district quantities
+>   (`corrected_level_mean`, ā anchor, β_d) describe the archived run.
+> * 05 fits **all 18 planning districts** × 3 specs and, per district, renders
+>   the full 03-style diagnostic figure set (temporal + seasonal components,
+>   self-excitation / trigger figures, covariate forest, spatial surface,
+>   uncertainty, road network, Δt distributions) for the `baseline` and
+>   `offset_fixed` fits, under
+>   `output/figures/corrected_hawkes/districts/{district}/{spec}/`, plus
+>   per-district Δ f_xy_norm maps (corrected − baseline, CBG + native grid)
+>   at each district folder's top level. Citywide
+>   mosaics (`ch_map_f_xy_norm_*`, incl. new native-grid `*_grid` variants,
+>   normalized within each district) cover the whole city.
+>
+> Pipeline order: **05a → 05**. Pre-refactor outputs live under
+> `archive/output/` (`corrected_hawkes_04offset/`, `streetlight_2district_run/`).
+
+Runs and folders under `output/` (figures mirror the layout under
+`output/figures/`):
 
 | run | NT instrument | decomposition scope | Cox-Hawkes fits | outputs |
 | --- | --- | --- | --- | --- |
-| main (`05`) | 04 spec A: 5 curated categories | citywide (reuses 04's existing outputs) | all 18 districts | `output/corrected_hawkes/` |
-| street-light (`05b`) | **`Street Light Outage` only** — Alley Light Outage, Traffic Signal Emergency, Stop Sign Repair, Dead Animal in Street removed | **single citywide fit** (no district layer; poles as NT exposure) — see below | **Central** (Center City) and **University Southwest** (University City) only | `output/corrected_hawkes_streetlight/` |
-
-> **Note (2026-07-13).** The 05b run was refactored and is now documented in
-> its own note, `05b_streetlight_citywide.md`. Its decomposition is no longer
-> a per-district refit of 04: it is ONE citywide two-equation fit over all
-> CBGs (single β, no `corrected_level`/ā anchor), with the street-pole
-> inventory as the NT-equation exposure and PSIP robustness checks. For that
-> run the two-layer offset of §2 collapses to just the within-CBG layer,
-> `offset_i = β·ŵ_R,i`. §2's per-district derivation continues to describe the
-> main (`05`) run only.
+| decomposition (`05a`) | **`Street Light Outage` only** | **single citywide fit** (no district layer; poles as NT exposure) | — (feeds 05) | `output/corrected_hawkes_streetlight/` |
+| corrected Cox-Hawkes (`05`) | offset from 05a | citywide | **all 18 districts** | `output/corrected_hawkes/` |
 
 ---
 
@@ -336,6 +358,13 @@ propensity is stripped out (dumping was masked by quiet phones); negative:
 raw hotspot partly explained away by chatty reporters. Note both surfaces
 are separately min-max normalized within district, so this is a shift in
 *relative* within-district position, not in absolute intensity.
+
+`districts/{district}/{district}_f_xy_norm_delta_{cbg,grid}.png` **— the
+same delta, per district.** One diverging map per district (color scale
+symmetric about 0, district-specific range), at CBG aggregation and at the
+model's native 25×25 grid. The CBG variant includes the ring of
+neighboring CBGs that intersect the district (the same covariate set the
+fit saw), so it extends slightly past the district outline.
 
 `ch_map_a_0_offset_fixed.png` **— fitted intercepts (diagnostic only).**
 $\text{color}*d = \hat a*{0,d}$ under `offset_fixed`. Designed as a
