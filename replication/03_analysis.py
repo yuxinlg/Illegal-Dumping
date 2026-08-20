@@ -986,6 +986,38 @@ def plot_trigger_posterior(
 
 # ─── 2-J: Spatial trigger 3-panel ────────────────────────────────────────────
 
+def _fetch_major_roads(study_box: gpd.GeoDataFrame):
+    """
+    Fetch arterial-only OSM roads (motorway/trunk/primary/secondary, incl.
+    link ramps) covering study_box, reprojected to study_box.crs.
+
+    Returns None on failure (osmnx not installed, or a network/Overpass
+    error) so callers can skip the overlay without failing the whole figure.
+    """
+    try:
+        import osmnx as ox
+    except ImportError:
+        print("  [SKIP] osmnx is not installed. `pip install osmnx`")
+        return None
+    polygon_ll = (
+        gpd.GeoSeries([study_box.geometry.iloc[0]], crs=study_box.crs)
+        .to_crs(4326)
+        .iloc[0]
+    )
+    custom_filter = (
+        '["highway"~"motorway|motorway_link|trunk|trunk_link|'
+        'primary|primary_link|secondary|secondary_link"]'
+    )
+    try:
+        G = ox.graph_from_polygon(
+            polygon_ll, custom_filter=custom_filter, simplify=True, retain_all=True
+        )
+        return ox.graph_to_gdfs(G, nodes=False).to_crs(study_box.crs)
+    except Exception as e:
+        print(f"  [SKIP] major-road fetch failed: {e}")
+        return None
+
+
 def plot_spatial_trigger_3panel(
     model: Hawkes_Model,
     study_box: gpd.GeoDataFrame,
@@ -994,6 +1026,7 @@ def plot_spatial_trigger_3panel(
     prefix: str,
     fig_out: str,
     dpi: int = 300,
+    add_major_roads: bool = True,
 ) -> None:
     """
     Three-panel spatial trigger figure.
@@ -1009,6 +1042,9 @@ def plot_spatial_trigger_3panel(
     all_parks_gdf : GeoDataFrame  (EPSG:26918)
     layers : dict  from load_supporting_layers()
     prefix, fig_out, dpi
+    add_major_roads : bool
+        Overlay OSM arterials on the centre panel (skipped if osmnx/Overpass
+        is unavailable).
     """
     print("\n[J] Plotting spatial trigger 3-panel ...")
     _show = plt.show
@@ -1043,6 +1079,11 @@ def plot_spatial_trigger_3panel(
     axs[1].set_ylim(ylim)
     axs[1].get_xaxis().set_visible(False)
     axs[1].get_yaxis().set_visible(False)
+
+    if add_major_roads:
+        roads = _fetch_major_roads(study_box)
+        if roads is not None and not roads.empty:
+            roads.plot(ax=axs[1], color="white", linewidth=0.6, alpha=0.7, zorder=5)
 
     # ── Right panel: land-use + OSM basemap ───────────────────────────────────
     osm_ax  = fig.add_axes([1.0, 0.1, 0.3, 0.8])
