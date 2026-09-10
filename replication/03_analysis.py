@@ -42,9 +42,10 @@ Outputs  (written to replication/output/figures/{prefix}/)
   {prefix}_temporal_components.png   GP temporal intensity + histogram
   {prefix}_seasonal_components.png   GP seasonal intensity + histogram
 
-    Where {prefix} is:
-    USE_PARK = True   →  PARK_NAME as-is, e.g. "mifflin" or "fairmount_aoi"
-    USE_PARK = False  →  "{lat:.4f}_{lon:.4f}", e.g. "39.9526_-75.1652"
+    Where {prefix} is the study-area label plus EXCITATION_SUPPORT:
+    USE_PARK = True   →  e.g. "mifflin_rectangle" or "fairmount_aoi_polygon"
+    USE_PARK = False  →  e.g. "39.9526_-75.1652_rectangle"
+    USE_CITY / USE_DISTRICT →  e.g. "philadelphia_polygon"
 """
 
 # =============================================================================
@@ -53,6 +54,7 @@ Outputs  (written to replication/output/figures/{prefix}/)
 
 import os
 import sys
+import time
 import warnings
 import calendar
 from datetime import datetime
@@ -91,6 +93,8 @@ import numpyro.distributions as dist
 
 import bstpp
 from bstpp.main import Hawkes_Model
+from bstpp.polygon_mass import prepare_polygon_mass_table
+from bstpp.preparation import prepare_domain
 from bstpp.trigger import Temporal_Power_Law
 
 # ── bstpp environment verification ────────────────────────────────────────────
@@ -306,11 +310,24 @@ TEMPORAL_CUTOFF_DAYS = 90.0     # 3 months
 SPATIAL_WINDOW       = 500.0    # metres; per-axis square excitation cutoff
 
 # Preview-only construction knobs (Hawkes_Model)
-EXCITATION_SUPPORT = "rectangle"   # bounding-rectangle compensator (historical)
+# Sole pathway switch: "rectangle" (bounding-rect compensator, historical) or
+# "polygon" (true-domain Hermite mass).  Polygon extras below are filled in
+# automatically — do not edit them to pick a pathway.
+EXCITATION_SUPPORT = "rectangle"   # "rectangle" | "polygon"
+if EXCITATION_SUPPORT not in ("rectangle", "polygon"):
+    raise ValueError(
+        f"EXCITATION_SUPPORT must be 'rectangle' or 'polygon'; "
+        f"got {EXCITATION_SUPPORT!r}."
+    )
 DATA_CONTRACTS     = "report"      # warn on coverage gaps; do not reject
 # Prior on spatial trigger variance sigmax_2 (square metres).  250 m is the
 # provisional default from the BSTPP_preview park-fit template.
 SPATIAL_SIGMA_PRIOR_SCALE_M = 250.0
+# Used only when EXCITATION_SUPPORT == "polygon" (BSTPP requires explicit
+# sigma bounds + a prepared mass table).  10 m is the validated table floor;
+# 5 km is the package polygon default — wide enough not to crush the prior.
+POLYGON_MIN_SIGMA_M = 10.0
+POLYGON_MAX_SIGMA_M = 5000.0
 
 # ── SVI optimiser parameters ──────────────────────────────────────────────────
 SVI_LR        = 0.01        # learning rate for Adam optimiser
@@ -772,6 +789,44 @@ def legacy_citywide_standardize_covariates(
     return standardized, record
 
 
+def _prepare_polygon_mass_table(
+    locs_s: pd.DataFrame,
+    study_box: gpd.GeoDataFrame,
+    spatial_window: float,
+):
+    """Build the Hermite mass table BSTPP requires for polygon excitation.
+
+    Matches Hawkes_Model validation: union geometry of a GeoDataFrame domain
+    (or the bounding rectangle of an array domain), event X/Y in real CRS
+    units, and the same spatial_window used at construction.
+    """
+    print(
+        f"  Preparing polygon mass table "
+        f"(min_sigma={POLYGON_MIN_SIGMA_M:g} m, "
+        f"max_sigma={POLYGON_MAX_SIGMA_M:g} m, "
+        f"spatial_window={spatial_window:g} m, n={len(locs_s):,}) ..."
+    )
+    t0 = time.perf_counter()
+    dom = prepare_domain(study_box)
+    if dom.is_polygon:
+        geom = dom.union_geometry
+    else:
+        bounds = dom.bounds
+        geom = shapely_box(bounds[0, 0], bounds[1, 0], bounds[0, 1], bounds[1, 1])
+    table = prepare_polygon_mass_table(
+        geom,
+        locs_s["X"].to_numpy(dtype=float),
+        locs_s["Y"].to_numpy(dtype=float),
+        min_sigma=float(POLYGON_MIN_SIGMA_M),
+        max_sigma=float(POLYGON_MAX_SIGMA_M),
+        spatial_window=spatial_window,
+        crs=dom.crs,
+    )
+    elapsed = time.perf_counter() - t0
+    print(f"  Polygon mass table ready in {elapsed:.1f} s")
+    return table
+
+
 def setup_and_fit_model(
     locs_s: pd.DataFrame,
     study_box: gpd.GeoDataFrame,
@@ -788,6 +843,10 @@ def setup_and_fit_model(
 ) -> Hawkes_Model:
     """
     Construct, configure, and fit a Cox-Hawkes model via SVI.
+
+    Pathway is selected by the module-level ``EXCITATION_SUPPORT`` switch:
+    ``"rectangle"`` uses the bounding-rectangle compensator; ``"polygon"``
+    prepares a Hermite mass table and passes ``min_sigma`` / ``max_sigma``.
 
     Uses BSTPP_preview ``Hawkes_Model(cox_background=True)``.  ``litter_df``
     and ``cleanup_df`` are accepted for call-site compatibility with
@@ -824,6 +883,7 @@ def setup_and_fit_model(
     Hawkes_Model  — fitted model with posterior samples
     """
     print("\n[F] Setting up Cox-Hawkes model (Hawkes_Model, cox_background=True) ...")
+    print(f"  Pathway: excitation_support={EXCITATION_SUPPORT}")
     if litter_df is not None or cleanup_df is not None:
         print(
             "  [WARN] litter/cleanup tables were loaded but are not attached "
@@ -841,10 +901,7 @@ def setup_and_fit_model(
     )
 
     sigma_m = SPATIAL_SIGMA_PRIOR_SCALE_M
-    model = Hawkes_Model(
-        locs_s,
-        study_box,
-        total_days,
+    hawkes_kwargs = dict(
         cox_background=True,
         spatial_cov=cov_gdf_model,
         cov_names=active_cov_names,
@@ -861,12 +918,26 @@ def setup_and_fit_model(
         sigmax_2=dist.HalfNormal(float(sigma_m) ** 2),
         temporal_trig=Temporal_Power_Law,
     )
+    if EXCITATION_SUPPORT == "polygon":
+        mass_table = _prepare_polygon_mass_table(
+            locs_s, study_box, spatial_window=spatial_window
+        )
+        hawkes_kwargs["mass_table"] = mass_table
+        hawkes_kwargs["min_sigma"] = POLYGON_MIN_SIGMA_M
+        hawkes_kwargs["max_sigma"] = POLYGON_MAX_SIGMA_M
+
+    model = Hawkes_Model(locs_s, study_box, total_days, **hawkes_kwargs)
     print(
         f"  Temporal cutoff: {temporal_cutoff_days:g} days  |  "
         f"spatial window: {spatial_window:g} m  |  "
         f"sigmax_2 prior scale: {sigma_m:g} m  |  "
         f"excitation_support={EXCITATION_SUPPORT}"
     )
+    if EXCITATION_SUPPORT == "polygon":
+        print(
+            f"  Polygon sigma bounds: [{POLYGON_MIN_SIGMA_M:g}, "
+            f"{POLYGON_MAX_SIGMA_M:g}] m"
+        )
 
     print(f"\n[F] Fitting model (lr={svi_lr}, num_steps={svi_num_steps}) ...")
     model.run_svi(lr=svi_lr, num_steps=svi_num_steps, plot_loss=False)
@@ -1648,7 +1719,8 @@ if __name__ == "__main__":
         prefix = active_park_name
     else:
         prefix = make_fig_prefix(USE_PARK, active_park_name, _lat, _lon)
-    print(f"  Figure prefix: '{prefix}'")
+    prefix = f"{prefix}_{EXCITATION_SUPPORT}"
+    print(f"  Figure prefix: '{prefix}'  (excitation_support={EXCITATION_SUPPORT})")
 
     # Park polygon for the active study area only — used in all plot overlays.
     # PARKNAME in all_parks_gdf uses the park key (e.g. "cobbs_aoi"), same as
@@ -1761,6 +1833,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"  Mode:             {'city' if USE_CITY else 'district' if USE_DISTRICT else 'park' if USE_PARK else 'custom coordinate'}")
     print(f"  Study area:       {active_park_name}")
+    print(f"  Pathway:          {EXCITATION_SUPPORT}")
     print(f"  Figure prefix:    {prefix}")
     print(f"  Baseline date:    {baseline_time.date()}")
     print(f"  Events in locs_s: {len(locs_s):,}")

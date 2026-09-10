@@ -21,6 +21,8 @@ Two methods, chosen by DIVISION below:
 
 This script only *reads* functions and config constants already defined in
 03_analysis.py (loaded as a module below). It does not modify that file.
+The BSTPP rectangle vs polygon pathway is the same ``EXCITATION_SUPPORT``
+switch in 03_analysis.py — do not add a second copy here.
 
 Required inputs
 ----------------
@@ -32,8 +34,8 @@ Required inputs
 Outputs
 -------
   planning_district mode:
-    output/planning_district_fit_summary.csv / .geojson
-    output/figures/planning_district_maps/pd_map_{stat}.png
+    output/planning_district_fit_summary_{support}.csv / .geojson
+    output/figures/planning_district_maps_{support}/pd_map_{stat}.png
 
   neighborhood mode:
     output/neighborhood_density.csv / .geojson
@@ -78,11 +80,12 @@ filter_events_and_build_locs_s = analysis_base.filter_events_and_build_locs_s
 validate_cov_names              = analysis_base.validate_cov_names
 setup_and_fit_model              = analysis_base.setup_and_fit_model
 
-COV_NAMES       = analysis_base.COV_NAMES
-OFFSET_SEASONAL = analysis_base.OFFSET_SEASONAL
-SVI_LR          = analysis_base.SVI_LR
-SVI_NUM_STEPS   = analysis_base.SVI_NUM_STEPS
-FILTER_TO_COV   = analysis_base.FILTER_TO_COV
+COV_NAMES            = analysis_base.COV_NAMES
+OFFSET_SEASONAL      = analysis_base.OFFSET_SEASONAL
+SVI_LR               = analysis_base.SVI_LR
+SVI_NUM_STEPS        = analysis_base.SVI_NUM_STEPS
+FILTER_TO_COV        = analysis_base.FILTER_TO_COV
+EXCITATION_SUPPORT   = analysis_base.EXCITATION_SUPPORT  # edit in 03_analysis.py only
 
 ILLEGAL_DUMPING_PATH = analysis_base.ILLEGAL_DUMPING_PATH
 COV_CBG_PATH         = analysis_base.COV_CBG_PATH
@@ -125,8 +128,10 @@ UNIT_SUBSET = None   # e.g. ["CENTRAL", "SOUTH"] or None for all units
 
 FIG_DPI = 300
 
-DIV_FIG_OUT = os.path.join(FIG_BASE, f"{DIVISION}_maps")
+DIV_FIG_OUT = os.path.join(FIG_BASE, f"{DIVISION}_maps_{EXCITATION_SUPPORT}")
 os.makedirs(DIV_FIG_OUT, exist_ok=True)
+print(f"  Inherited excitation_support={EXCITATION_SUPPORT} (from 03_analysis.py)")
+print(f"  Figures → {DIV_FIG_OUT}")
 
 
 # =============================================================================
@@ -345,8 +350,8 @@ def run_planning_district_mode() -> None:
 
     summary = gpd.GeoDataFrame(pd.DataFrame(rows), geometry="geometry", crs=districts.crs)
 
-    out_geojson = os.path.join(OUT, "planning_district_fit_summary.geojson")
-    out_csv     = os.path.join(OUT, "planning_district_fit_summary.csv")
+    out_geojson = os.path.join(OUT, f"planning_district_fit_summary_{EXCITATION_SUPPORT}.geojson")
+    out_csv     = os.path.join(OUT, f"planning_district_fit_summary_{EXCITATION_SUPPORT}.csv")
     summary.to_crs(4326).to_file(out_geojson, driver="GeoJSON")
     summary.drop(columns="geometry").to_csv(out_csv, index=False)
     print(f"\nSaved summary → {out_geojson}, {out_csv}")
@@ -366,7 +371,7 @@ def run_planning_district_mode() -> None:
         cbg_mosaic = gpd.GeoDataFrame(cbg_mosaic, geometry="geometry", crs=districts.crs)
         cbg_mosaic = cbg_mosaic.drop_duplicates(subset="GEOID", keep="first")
 
-        out_geojson = os.path.join(OUT, "planning_district_cbg_fxy.geojson")
+        out_geojson = os.path.join(OUT, f"planning_district_cbg_fxy_{EXCITATION_SUPPORT}.geojson")
         cbg_mosaic.to_crs(4326).to_file(out_geojson, driver="GeoJSON")
         print(f"  Saved → {out_geojson}")
 
@@ -386,7 +391,7 @@ def run_planning_district_mode() -> None:
         grid_mosaic = pd.concat(grid_fxy_rows, ignore_index=True)
         grid_mosaic = gpd.GeoDataFrame(grid_mosaic, geometry="geometry", crs=districts.crs)
 
-        out_geojson = os.path.join(OUT, "planning_district_grid_fxy.geojson")
+        out_geojson = os.path.join(OUT, f"planning_district_grid_fxy_{EXCITATION_SUPPORT}.geojson")
         grid_mosaic.to_crs(4326).to_file(out_geojson, driver="GeoJSON")
         print(f"  Saved → {out_geojson}")
 
